@@ -99,6 +99,7 @@ The backend then:
 | POST | `/api/narration` | tour narration for each room |
 | POST | `/api/inspiration` | inspiration photo → style, colours, floor, finish |
 | POST | `/api/report-summary` | executive summary for the report |
+| POST | `/api/render` | AI photo render: `{image (data URL of the 3D view), mode, style, light, setting, hd, notes, theme, floors}` → `{image, model, ms, remaining}` |
 | POST | `/api/ai/test` | a one-line check that the AI answers |
 | POST | `/api/auth/signup` · `/api/auth/login` | `{email, password, name}` → `{user, token}` (send as `Authorization: Bearer <token>`) |
 | POST | `/api/auth/logout` | end this session |
@@ -113,7 +114,7 @@ AI endpoints return **503 `ai_unavailable`** when no model is connected; the fro
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-python -m pytest -q             # 53 tests: DSA units + API (AI mocked, incl. a fake Gemini server)
+python -m pytest -q             # 65 tests: DSA units + API (AI mocked, incl. a fake Gemini server for text and images)
 python tests/fake_ollama.py     # optional: a fake Ollama on :11434 for end-to-end runs with no GPU
 ```
 
@@ -134,14 +135,26 @@ backend/
     planner/layout.py         pixels → metres, room typing, snapping, doors/windows (union-find de-dup)
     planner/floors.py         floor names/levels, alignment (Hungarian matching), stair fitting
     planner/analysis.py       graph analytics and tour order
-    ai/client.py              Gemini (main), Ollama/OpenRouter fallbacks, JSON extraction
-    ai/services.py            prompts and validation of every AI answer
+    ai/client.py              Gemini (main), Ollama/OpenRouter fallbacks, JSON extraction, Gemini image renders
+    ai/services.py            prompts and validation of every AI answer, AI photo render prompt
     pipeline.py               uploads → finished floors
   tests/                      pytest suite + fake Ollama server
 frontend/                     the web app (HTML/CSS/JS, WebGL2 3D engine)
 docs/DSA.md                   every data structure and algorithm, with complexity
 samples/                      two one-floor plans to try
 ```
+
+## AI photo render (v2.12)
+Press **📸 AI Render** in the 3D view (or ask Aria for "a photorealistic render"). DIMORA takes a picture of *your* 3D model and Google's Gemini image model ("Nano Banana") repaints it as a realistic architectural render.
+
+- **Starts from your 3D model, not from the flat plan**, so the render keeps your real footprint, number of floors, doors, windows, terraces and camera angle. Tools that send only the 2D plan to an AI tend to invent rooms and roofs.
+- **Two views:** *Outside*, an aerial three-quarter view from the side with the main entrance, and *Dollhouse*, a roof-off cutaway of the furnished floor.
+- **Styles:** Mediterranean (terracotta tiled roofs, cream stucco, timber railings), Modern villa, Classic Indian, Kerala tiled roof, or *Keep my 3D look*. While it takes the picture, DIMORA switches the 3D model to the matching exterior, so the roof shape the AI starts from already fits the style. Your own settings are put back afterwards.
+- **Light:** golden hour, daylight or evening. **Background:** clean white (a cut-out, like a brochure) or garden and sky. **Quality:** Standard (1K) or HD (2K, uses the Pro model). Add extra wishes in plain words ("blue front door", "solar panels").
+- A **before/after slider** compares the render with the 3D model. **Download** saves it, **Another version** asks again, and every render of the session stays in a strip of thumbnails.
+- **New Mediterranean exterior** in Design → Exterior style: real hip roofs with timber fascias and ridge tiles (the roofed area is split into a few large rectangles, see `hipRects`), dark timber window frames and railings, and a paved roof terrace with a timber railing wherever an upper floor steps back.
+
+**Setup:** uses the same `GEMINI_API_KEY`. Image models have little or no free allowance, so enable billing in Google AI Studio for a public site. Models: `GEMINI_IMAGE_MODEL` (default `gemini-nano-banana-2.1`), `GEMINI_IMAGE_MODEL_HD` (default `gemini-3-pro-image`), and `GEMINI_IMAGE_FALLBACKS`, which are tried in order if a model name isn't found. On a public site (`DIMORA_PUBLIC=1`) renders on your key are limited separately: `DIMORA_RENDER_PER_HOUR` per visitor (default 6; an HD render uses 3) and `DIMORA_RENDER_PER_DAY` for the whole site (default 60). Visitors who paste their own Gemini key in ⚙ Settings are not limited.
 
 ## Real walls, real stairs, real-home feel (v2.11)
 - **Rooms never overlap.** In the 2D plan, dragging a room's edge works like moving a real wall:

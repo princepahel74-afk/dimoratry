@@ -132,3 +132,90 @@ def report_summary(ai: AIClient, facts: str, room_facts: str) -> str:
               f"Plain text, Indian Rupees, no markdown. Respond ONLY JSON: {{\"summary\":\"...\"}}")
     j = ai.ask_json(prompt, temperature=0.5, max_tokens=600)
     return str(j.get("summary") or "")
+
+
+# ---------- AI photo render ----------
+# The browser sends a screenshot of the user's own 3D model. The image model repaints it as a photo but must
+# keep the geometry, so the result shows *their* plan, not an invented house.
+RENDER_STYLES = {
+    "mediterranean": ("Mediterranean villa",
+                      "Mediterranean villa: terracotta clay barrel-tile hip roofs over the enclosed rooms of the top floor "
+                      "(open terraces stay flat and walkable), warm cream stucco walls, dark-stained timber railings, window "
+                      "frames and French doors, stone-paved terraces with a wooden dining set and a white patio umbrella, "
+                      "potted geraniums, olive and boxwood shrubs in terracotta pots, black wall lanterns."),
+    "modern": ("Modern villa",
+               "Contemporary villa: flat roofs with slim overhanging eaves, crisp white render, stacked-stone feature "
+               "walls, warm timber battens, large black-framed glass, glass balcony railings, minimalist planters with "
+               "ornamental grasses."),
+    "indian": ("Classic Indian",
+               "Classic Indian bungalow: warm sand-coloured plaster, stone plinth, moulded cornice bands, concrete "
+               "sunshades (chajjas) over the windows, parapet walls around flat roof terraces, a carved teak main door, "
+               "brass lamps, a tulsi planter, marigolds and bougainvillea."),
+    "kerala": ("Kerala tiled roof",
+               "Traditional Kerala house: steep Mangalore clay-tile pitched roofs with timber eaves over the enclosed "
+               "rooms, white lime-plastered walls, laterite stone base, wooden verandah pillars and railings, red-oxide "
+               "verandah floors, coconut palms and banana plants."),
+    "match": ("Keep my 3D colours",
+              "Keep the wall colours, roof type and materials that are visible in the model exactly, and make them "
+              "look like real, high-quality building materials."),
+}
+RENDER_LIGHT = {
+    "golden": "warm golden-hour sunlight from a low sun, long soft shadows, gentle warm glow on the walls",
+    "day": "bright, clear midday daylight with soft natural shadows",
+    "evening": "dusk with a deep blue sky; warm interior lights and wall lanterns glowing through the windows",
+}
+RENDER_SETTING = {
+    "white": "Show only the house and its plot, cut out cleanly on a plain white background like a product shot "
+             "(no sky, no neighbouring buildings, no horizon).",
+    "garden": "Place the house in its plot with a neat lawn, paved paths, trees and a soft natural sky behind it.",
+}
+RENDER_ASPECTS = ("4:3", "3:4", "1:1", "3:2", "16:9")
+
+
+def _clean(s, n):
+    return re.sub(r"\s+", " ", str(s or "")).strip()[:n]
+
+
+def render_prompt(opts: dict) -> str:
+    """Instruction for the image model. opts: mode, style, light, setting, theme, floors, notes."""
+    mode = "dollhouse" if opts.get("mode") == "dollhouse" else "exterior"
+    light = RENDER_LIGHT.get(opts.get("light"), RENDER_LIGHT["golden"])
+    floors = [f for f in (opts.get("floors") or []) if isinstance(f, dict)][:15]
+    n = len(floors) or int(opts.get("storeys") or 1)
+    plan = "; ".join(f"{_clean(f.get('name'), 30) or 'Floor'}: " + ", ".join(_clean(r, 30) for r in (f.get("rooms") or [])[:20])
+                     for f in floors)
+    notes = _clean(opts.get("notes"), 300)
+    keep = (f"KEEP EXACTLY (this is the client's real floor plan):\n"
+            f"- the camera angle, framing and perspective of the screenshot;\n"
+            f"- the building footprint and outline, every wall position, and the number of storeys "
+            f"({n} {'storey' if n == 1 else 'storeys'});\n"
+            f"- every door and window opening where it is, plus the balconies, terraces, parking and garden areas;\n"
+            f"- the furniture layout wherever it is visible.\n"
+            f"Do not add, remove, move or resize rooms, floors, wings, doors or windows. "
+            f"No text, labels, measurements, logos or watermarks.\n")
+    if mode == "dollhouse":
+        theme = _clean(opts.get("theme"), 40)
+        task = ("The attached image is a screenshot of a 3D cutaway model of a real home, generated from its floor plan: "
+                "the roof is removed and the walls are cut down so every room is visible from above.\n"
+                "Repaint it as a photorealistic isometric 'dollhouse' cutaway render of the furnished interior.\n\n")
+        style = (f"STYLE: {theme + ' interiors — ' if theme else ''}keep each room's wall colours, flooring and furniture "
+                 f"from the model, and make every material real: wood grain, fabric, tiles, rugs, cushions, indoor plants, "
+                 f"lamps. The cut wall tops are clean and white.\n"
+                 f"SETTING: plain white background around the cutaway, like an architectural presentation.\n")
+    else:
+        key = opts.get("style") if opts.get("style") in RENDER_STYLES else "mediterranean"
+        task = ("The attached image is a screenshot of a simple 3D model of a real house, generated from its floor plan "
+                "and seen from above at an angle.\nRepaint it as a finished, photorealistic aerial architectural render "
+                "of the outside of the house.\n\n")
+        style = (f"STYLE: {RENDER_STYLES[key][1]}\n"
+                 f"SETTING: {RENDER_SETTING.get(opts.get('setting'), RENDER_SETTING['white'])}\n")
+    return (task + keep + "\n" + style + f"LIGHT: {light}.\n"
+            + (f"FLOORS AND ROOMS: {_clean(plan, 900)}.\n" if plan else "")
+            + (f"CLIENT'S EXTRA WISHES (only if they don't break the rules above): {notes}\n" if notes else "")
+            + "QUALITY: high-end real-estate visualisation, sharp focus, realistic materials and soft, realistic shadows.")
+
+
+def photo_render(ai: AIClient, image_b64: str, opts: dict) -> dict:
+    aspect = opts.get("aspect") if opts.get("aspect") in RENDER_ASPECTS else "4:3"
+    out = ai.render_image(render_prompt(opts), image_b64, mime="image/jpeg", hd=bool(opts.get("hd")), aspect=aspect)
+    return {"image": f"data:{out['mime']};base64,{out['image']}", "model": out["model"], "note": out["note"]}

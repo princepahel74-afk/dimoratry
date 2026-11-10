@@ -504,6 +504,7 @@ class Engine {
     else if (kind === 'rbox') g = this._rbox(a, b, c, seg);
     else if (kind === 'cyl') g = this._cyl(a, b, seg, c);
     else if (kind === 'sph') g = this._sph(a, seg);
+    else if (kind === 'hip') g = this._hip(a, b, c);
     this.geoCache.set(key, g); return g;
   }
   // box: width a (x), height b (y, from 0), depth c (z), centered on x/z
@@ -516,6 +517,21 @@ class Engine {
     f([[-x, 0, -z], [-x, 0, z], [-x, h, z], [-x, h, -z]], [-1, 0, 0]);
     f([[-x, h, z], [x, h, z], [x, h, -z], [-x, h, -z]], [0, 1, 0]);
     f([[-x, 0, -z], [x, 0, -z], [x, 0, z], [-x, 0, z]], [0, -1, 0]);
+    return this._upload(P, N);
+  }
+  // hip roof over a w × d rectangle (centred on x/z, base at y 0), ridge height h along the longer side
+  _hip(w, h, d) {
+    const a = w / 2, b = d / 2, P = [], N = [], r = w >= d ? [a - b, 0] : [0, b - a];
+    const R1 = w >= d ? [-r[0], h, 0] : [0, h, -r[1]], R2 = w >= d ? [r[0], h, 0] : [0, h, r[1]];
+    const c00 = [-a, 0, -b], c10 = [a, 0, -b], c11 = [a, 0, b], c01 = [-a, 0, b], ref = [0, h / 3, 0];
+    const tri = (A, B, C) => { // wind each face so it points away from the inside of the roof
+      let n = V3.cross(V3.sub(B, A), V3.sub(C, A)); const L = V3.len(n); if (L < 1e-9) return; n = V3.scale(n, 1 / L);
+      const m = [(A[0] + B[0] + C[0]) / 3 - ref[0], (A[1] + B[1] + C[1]) / 3 - ref[1], (A[2] + B[2] + C[2]) / 3 - ref[2]];
+      if (n[0] * m[0] + n[1] * m[1] + n[2] * m[2] < 0) { [B, C] = [C, B]; n = V3.scale(n, -1); }
+      P.push(...A, ...B, ...C); N.push(...n, ...n, ...n);
+    };
+    if (w >= d) { tri(c01, c11, R2); tri(c01, R2, R1); tri(c10, c00, R1); tri(c10, R1, R2); tri(c11, c10, R2); tri(c00, c01, R1); }
+    else { tri(c11, c10, R1); tri(c11, R1, R2); tri(c00, c01, R2); tri(c00, R2, R1); tri(c01, c11, R2); tri(c10, c00, R1); }
     return this._upload(P, N);
   }
   // rounded box: like box, but every edge and corner is rounded with radius r (smooth normals) — furniture,
@@ -739,6 +755,15 @@ class Engine {
       tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); if (tmin > tmax) return null;
     }
     return tmax < 0 ? null : Math.max(tmin, 0);
+  }
+  // one frame at an exact size (e.g. 1440 × 1080 for an AI photo render), whatever the screen size
+  capture(w, h, type = 'image/jpeg', q = 0.92) {
+    const cv = this.canvas, sw = cv.width, sh = cv.height, fixed = this.fixed;
+    const max = Math.min(this.gl.getParameter(this.gl.MAX_RENDERBUFFER_SIZE) || 4096, this.gl.getParameter(this.gl.MAX_VIEWPORT_DIMS)?.[0] || 4096);
+    const k = Math.min(1, max / Math.max(w, h)); w = Math.round(w * k); h = Math.round(h * k);
+    this.fixed = true; cv.width = w; cv.height = h; this.dirty = true;
+    try { this.render(); return cv.toDataURL(type, q); }
+    finally { cv.width = sw; cv.height = sh; this.fixed = fixed; this.dirty = true; }
   }
   snapshot(w = 480, h = 300) {
     this.render();
@@ -2571,12 +2596,14 @@ function parseClause(c, room) {
   const intoPart = c.split(/\b(?:into|as an?|to become)\b/).slice(1).join(' ');
   const tr = (intoPart && findWord(intoPart, TRANSFORM_WORDS)) || findWord(stripRoom(c, room), TRANSFORM_WORDS);
   if (tr && /(convert|turn|transform|repurpose|change|make|into|become|use .* as)/.test(c) && !/(color|paint|floor|light)/.test(c)) return { do: 'transform', room, to: tr.v };
+  if (/(villa|facade|façade|exterior|elevation|outside|roof)/.test(c) && /(mediterranean|spanish|terracotta|tiled roof|clay roof)/.test(c) && !/(paint|colou?r)/.test(c)) return { do: 'facade', style: 'mediterranean' };
   if (/(villa|facade|façade|exterior|elevation|outside)/.test(c) && /(modern|contemporary|villa|stone|classic|traditional|indian|brick|planner)/.test(c) && !/(paint|colou?r)/.test(c)) return { do: 'facade', style: /brick/.test(c) ? 'brick' : /(classic|traditional|indian)/.test(c) ? 'classic' : 'modern' };
   const th = findWord(c, THEME_WORDS);
   if (th && /(style|theme|look|design|vibe|feel|make|apply|go|switch|change|redesign|turn|interior|decor)/.test(c)) return { do: 'theme', name: th.v, room: room && !/(whole|entire|house|home|everything|all)/.test(c) ? room : 'all' };
   if (/(false ceiling|cove|tray ceiling|peripheral ceiling|ceiling)/.test(c)) { const tp = /cove/.test(c) ? 'cove' : /tray/.test(c) ? 'tray' : /peripheral/.test(c) ? 'peripheral' : /(plain|flat|remove|no )/.test(c) ? 'flat' : 'cove'; return { do: 'ceiling', room: room || 'all', type: tp }; }
   const col = findColor(c);
   if (col && /(exterior|outside|outer wall|facade|façade|elevation|outside of the house)/.test(c)) return { do: 'exterior', color: col.hex, name: col.name };
+  if (/(ai render|photo ?render|photorealistic|realistic (photo|picture|image|render)|render (it|my home|my house|the house|the home|a photo))/.test(c)) return { do: 'render' };
   if (/\broof\b/.test(c) && /(show|see|view|add|put|on)/.test(c)) return { do: 'roof', on: !/(hide|remove|off|without)/.test(c) };
   if (col && /(paint|color|wall|make|change|turn|want|shade|tone|repaint|give)/.test(c) && !/\bfloor/.test(c) && !findWord(c, FURN_WORDS.filter(f => !['shelf', 'storage'].includes(f[0])))) return { do: 'wall_color', room: room || 'all', color: col.hex, name: col.name };
   const fl = findWord(c, FLOOR_WORDS);
@@ -2610,7 +2637,7 @@ function parseClause(c, room) {
 function execActions(actions, focus) {
   const done = [], fail = []; let needBuild = false, structural = false;
   if (!actions.length) return { done, fail };
-  const mutating = actions.some(a => !['tour', 'goto', 'view', 'open', 'time', 'suggest_paint', 'undo', 'show_floor', 'roof', 'cutaway', 'save_variant'].includes(a.do));
+  const mutating = actions.some(a => !['render', 'tour', 'goto', 'view', 'open', 'time', 'suggest_paint', 'undo', 'show_floor', 'roof', 'cutaway', 'save_variant'].includes(a.do));
   if (mutating) commit('AI: ' + actions.map(a => a.do).join(', '));
   const roomsOf = a => a.room === 'all' ? allRooms() : resolveRoom(a.room, focus);
   actions.forEach(a => {
@@ -2639,9 +2666,10 @@ function execActions(actions, focus) {
           const lv = parseLevel(q); const f = pj.floors.find(x => x.name.toLowerCase() === q) || pj.floors.find(x => q && x.name.toLowerCase().includes(q.replace(/ floor$/, ''))) || (lv != null ? pj.floors.find(x => x.level === lv) : null) || (/up/.test(q) ? floorAbove(FL()) : /down/.test(q) ? floorBelow(FL()) : null);
           if (!f) { fail.push('floor "' + a.floor + '"'); break; } pj.activeFloor = pj.floors.indexOf(f); S.showAllFloors = false; S.sel = null; rebuild(); renderFloorSeg(); if (S.view !== '2d') fitView(true); done.push(`Showing the ${f.name}.`); break; }
         case 'open': openPanel(a.panel); done.push(`Opened ${({ space: 'Space Analyzer', budget: 'Budget Estimator', light: 'Light & Ventilation', arch: 'Architectural checks', report: 'Home Decision Report', compare: 'Design Comparison', design: 'Interior Designer' })[a.panel] || a.panel}.`); break;
-        case 'facade': { const k = String(a.style || '').toLowerCase(), key = FACADES[k] ? k : /brick/.test(k) ? 'brick' : /(classic|indian|traditional)/.test(k) ? 'classic' : 'modern'; P().facade = key; P().exterior = null; done.push(`Exterior changed to ${FACADES[key].label} — ${FACADES[key].desc.toLowerCase()}.`); needBuild = true; break; }
+        case 'facade': { const k = String(a.style || '').toLowerCase(), key = FACADES[k] ? k : /(mediterranean|spanish|terracotta)/.test(k) ? 'mediterranean' : /brick/.test(k) ? 'brick' : /(classic|indian|traditional)/.test(k) ? 'classic' : 'modern'; P().facade = key; P().exterior = null; done.push(`Exterior changed to ${FACADES[key].label} — ${FACADES[key].desc.toLowerCase()}.`); needBuild = true; break; }
         case 'exterior': { const hex = /^#/.test(a.color) ? a.color : (NAMED_COLORS[String(a.color).toLowerCase()] || findColor(String(a.color).toLowerCase())?.hex); if (!hex) { fail.push('exterior colour'); break; } P().exterior = hex; done.push(`Painted the outside of the house ${a.name || hex}.`); needBuild = true; break; }
         case 'roof': { S.roof = a.on !== false; if (S.roof) S.cutaway = false; $('#t-roof')?.classList.toggle('on', S.roof); $('#t-cut')?.classList.toggle('on', S.cutaway); rebuild(); done.push(S.roof ? 'Showing the finished roof terrace.' : 'Roof hidden so you can see inside.'); break; }
+        case 'render': setTimeout(() => openRender(), 300); done.push('Opening the AI photo render — pick a style and press Render.'); break;
         case 'cutaway': { S.cutaway = a.on !== false; if (S.cutaway) S.roof = false; $('#t-cut')?.classList.toggle('on', S.cutaway); $('#t-roof')?.classList.toggle('on', S.roof); rebuild(); done.push(S.cutaway ? 'Cut the walls down so you can see every room.' : 'Walls back to full height.'); break; }
         case 'save_variant': { setTimeout(() => { const i = $('#var-name'); if (i) i.value = a.name || ''; ACT['save-variant'](); }, 50); done.push(`Saved this design as a variant${a.name ? ' “' + a.name + '”' : ''} — compare it in the Compare panel.`); break; }
         case 'suggest_paint': { const r = rooms[0] || allRooms()[0]; S.paintChips = { room: r.id, list: paintSuggestions(r) }; done.push(`Here are paint ideas for ${r.name} — tap one to apply:`); break; }
@@ -2686,8 +2714,9 @@ const ACTION_DOC = `Actions you can return (use exact keys; "room" is a room id 
 {"do":"open","panel":"design|space|budget|light|transform|arch|compare|report"}
 {"do":"suggest_paint","room":".."}
 {"do":"exterior","color":"#hex","name":"colour name"} (outside walls of the house)
-{"do":"facade","style":"modern|classic|brick"} (exterior style: modern villa = white + stacked stone + timber + dark roof overhang; classic Indian = plaster, plinth, chajjas, parapet; brick & white)
+{"do":"facade","style":"modern|classic|brick|mediterranean"} (exterior style: modern villa = white + stacked stone + timber + dark roof overhang; classic Indian = plaster, plinth, chajjas, parapet; brick & white; mediterranean = cream stucco, terracotta tiled hip roof, timber railings)
 {"do":"roof","on":true|false} {"do":"cutaway","on":true|false}
+{"do":"render"} (open the AI photo render: turns the 3D home into a photorealistic picture)
 {"do":"save_variant","name":".."} (snapshot the current design for comparison)`;
 const chatHistory = []; // kept for compatibility; the real memory lives in the project (S.project.chat)
 function chatMemory() { const pj = P(); if (!pj) return chatHistory; if (!Array.isArray(pj.chat)) pj.chat = []; return pj.chat; }
@@ -2912,6 +2941,7 @@ function rebuild(opts = {}) {
 /* ---------- the plot around the house: lawn, paving, path, boundary wall, garden ---------- */
 /* exterior styles: what the outside of the house is made of */
 const FACADES = {
+  mediterranean: { label: 'Mediterranean', desc: 'Cream stucco, terracotta tiled hip roofs, dark timber railings and window frames', wall: '#eadcc2', accent: null, band: 'cornice', plinth: true, chajja: false, frame: '#5a3a24', frameWood: true, rail: 'timber', roof: 'hip', drive: 'pavers', sw: ['#eadcc2', '#b4532f', '#5a3a24', '#c9b48f'] },
   modern: { label: 'Modern villa', desc: 'White render, stacked-stone feature walls, timber battens, dark roof overhangs', wall: '#efeeea', stone: ['#c9bba6', '#7f7466'], accent: 'stone', band: 'timber', plinth: false, chajja: false, frame: '#1c1e21', roof: 'overhang', drive: 'cobble', sw: ['#efeeea', '#d8d1c5', '#6b4429', '#2b2c2f'] },
   classic: { label: 'Classic Indian', desc: 'Warm plaster, stone plinth, moulded bands and window sunshades (chajjas)', wall: '#dacbb2', accent: null, band: 'cornice', plinth: true, chajja: true, frame: '#34383c', roof: 'parapet', drive: 'pavers', sw: ['#dacbb2', '#7d7166', '#e7dccb', '#34383c'] },
   brick: { label: 'Brick & white', desc: 'Exposed red-brick volumes, white render, slim black frames', wall: '#f1eee8', brick: ['#a5573c', '#d9d1c6'], accent: 'brick', band: 'cornice', plinth: true, chajja: false, frame: '#232426', roof: 'overhang', drive: 'cobble', sw: ['#f1eee8', '#a5573c', '#d9d1c6', '#232426'] },
@@ -3052,12 +3082,20 @@ function buildSite(b) {
     bush(g, horiz ? u : fx, horiz ? fz : u, 0.55, Math.round(u * 10), -0.06); }
 }
 /* ---------- open-air spaces: balcony railings, car parking, gardens ---------- */
+const TEAK = { color: '#5a3a24', rough: 0.62 };
 function buildRail(box, p, extCol) { // modern balcony railing: low upstand, frameless glass, steel posts and handrail
   const len = p.b - p.a, mid = (p.a + p.b) / 2, steel = { color: '#c3c7cc', metal: 0.9, rough: 0.25 };
   box(p.o, len + 0.04, 0.12, 0.14, mid, 0, p.c, { color: mixHex(extCol, '#ffffff', 0.2), pattern: 10 });
   box(p.o, Math.max(0.05, len - 0.04), 0.86, 0.014, mid, 0.13, p.c, { color: '#6f8790', pattern: 15, alpha: 0.1, cast: false });
   box(p.o, len + 0.04, 0.05, 0.07, mid, 1.0, p.c, steel);
   const n = Math.max(1, Math.ceil(len / 1.3)); for (let i = 0; i <= n; i++) box(p.o, 0.045, 0.9, 0.05, p.a + 0.03 + (len - 0.06) * i / n, 0.12, p.c, steel);
+}
+function buildTimberRail(box, p) { // Mediterranean balcony / terrace railing: dark timber posts, rails and balusters
+  const len = p.b - p.a, mid = (p.a + p.b) / 2;
+  const n = Math.max(1, Math.ceil(len / 1.6)), k = Math.max(2, Math.round(len / 0.2));
+  box(p.o, len + 0.06, 0.08, 0.11, mid, 0.96, p.c, TEAK); box(p.o, len, 0.06, 0.07, mid, 0.08, p.c, TEAK);
+  for (let i = 0; i <= n; i++) box(p.o, 0.11, 1.06, 0.11, p.a + 0.055 + (len - 0.11) * i / n, 0, p.c, TEAK);
+  for (let i = 1; i < k; i++) box(p.o, 0.035, 0.82, 0.035, p.a + len * i / k, 0.14, p.c, TEAK);
 }
 // deterministic pseudo-random numbers per room, so the landscaping doesn't jump around on every rebuild
 function seeded(seed) { let h = 2166136261; for (const ch of String(seed)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return () => { h = (h + 0x6D2B79F5) | 0; let t = Math.imul(h ^ (h >>> 15), 1 | h); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
@@ -3252,7 +3290,7 @@ function buildFloor(f, active) {
   // walls: two half-slabs per piece, each finished for the room (paint) or the outside (textured plaster)
   const wg = E.addGroup('walls:' + f.id, { kind: 'wall', y: yOff });
   const extCol = extColor(), ground = !floorBelow(f);
-  const fc = facade(), FRAME = { color: fc.frame, metal: 0.55, rough: 0.38 };
+  const fc = facade(), FRAME = fc.frameWood ? { color: fc.frame, rough: 0.6 } : { color: fc.frame, metal: 0.55, rough: 0.38 };
   const box = (o, len, h, th, along, y, across, extra) => E.part(wg, Object.assign(o === 'h' ? { geo: E.geo('box', len, h, th), x: along, y, z: across } : { geo: E.geo('box', th, h, len), x: across, y, z: along }, extra));
   const isOut = r => !r || isOpenAir(r);
   // a wall can't stand over a stair opening: cut any stretch that runs across a flight coming up from below
@@ -3261,7 +3299,7 @@ function buildFloor(f, active) {
       segs = segs.flatMap(([a, b]) => { const lo = Math.max(a, a0), hi = Math.min(b, a1); if (hi - lo < 0.02) return [[a, b]]; const o = []; if (lo - a > 0.05) o.push([a, lo]); if (b - hi > 0.05) o.push([hi, b]); return o; }); });
     return segs.map(([a, b]) => Object.assign({}, p, { a, b })); });
   cutHoles(wallPieces(f)).forEach(p => {
-    if (p.kind === 'rail') { buildRail(box, p, extCol); return; }
+    if (p.kind === 'rail') { (fc.rail === 'timber' ? buildTimberRail : buildRail)(box, p, extCol); return; }
     let y0 = p.y0, y1 = p.y1; if (cut != null) { if (y0 >= cut) return; y1 = Math.min(y1, cut); }
     if (y1 - y0 < 0.01) return;
     // outer walls run past the line ends to close the corners; partitions stop just inside the outer face
@@ -3408,12 +3446,62 @@ function buildEaves(f, yOff) {
 }
 /* the part of a lower floor's roof that sticks out past the floor above (e.g. a garage) */
 function buildLowRoof(f, yOff, above) {
-  if (facade().roof !== 'overhang') return; const H = f.height, g = E.addGroup('roof:' + f.id, { kind: 'misc', y: yOff });
+  const hip = facade().roof === 'hip'; if (facade().roof !== 'overhang' && !hip) return; const H = f.height, g = E.addGroup('roof:' + f.id, { kind: 'misc', y: yOff });
   f.rooms.filter(r => roofed(f, r)).forEach(r => rectMinus({ x: r.x, y: r.y, w: r.w, d: r.d }, above.rooms).forEach(q => {
     if (q.w < 0.3 || q.d < 0.3) return;
     E.part(g, { geo: E.geo('box', q.w + 0.02, 0.18, q.d + 0.02), x: q.x + q.w / 2, y: H, z: q.y + q.d / 2, color: '#d4d0c9', showBelow: yOff + H - 0.05 });
-    E.part(g, { geo: E.geo('box', q.w, 0.02, q.d), x: q.x + q.w / 2, y: H + 0.18, z: q.y + q.d / 2, color: '#8d8a85', color2: '#6f6c68', pattern: 8, cast: false });
+    E.part(g, hip ? { geo: E.geo('box', q.w, 0.02, q.d), x: q.x + q.w / 2, y: H + 0.18, z: q.y + q.d / 2, color: '#cbb894', color2: '#a8946f', pattern: 14, patScale: 0.6, cast: false }
+      : { geo: E.geo('box', q.w, 0.02, q.d), x: q.x + q.w / 2, y: H + 0.18, z: q.y + q.d / 2, color: '#8d8a85', color2: '#6f6c68', pattern: 8, cast: false });
   }));
+  if (!hip) return; // Mediterranean: the exposed roof is a stone-paved terrace with a timber railing along its open edges
+  const walledAbove = (o, c, t, sign) => { const p = o === 'h' ? [t, c - sign * 0.3] : [c - sign * 0.3, t]; return above.rooms.some(r => !isOpenAir(r) && inRoom(r, p[0], p[1])); };
+  const box = (o, len, h, th, along, y, across, m) => E.part(g, Object.assign(o === 'h' ? { geo: E.geo('box', len, h, th), x: along, y: H + 0.2 + y, z: across } : { geo: E.geo('box', th, h, len), x: across, y: H + 0.2 + y, z: along }, m));
+  wallLines(f).forEach(L0 => roofRunsOf(f, L0, above.rooms).forEach(sg => {
+    if (walledAbove(L0.o, L0.c, (sg.a + sg.b) / 2, sg.sign) || sg.b - sg.a < 0.4) return;
+    buildTimberRail(box, { o: L0.o, a: sg.a, b: sg.b, c: L0.c });
+  }));
+}
+/* Mediterranean roofs: the roofed area is split into a few big rectangles (largest first, each grown as far as
+   the footprint allows, so neighbours overlap and read as one roof), and each gets a terracotta hip roof */
+function hipRects(f) {
+  const rs = f.rooms.filter(r => roofed(f, r)).concat(roofHoles(f)); if (!rs.length) return [];
+  const C = 0.25, x0 = Math.min(...rs.map(r => r.x)), y0 = Math.min(...rs.map(r => r.y));
+  const W = Math.ceil((Math.max(...rs.map(r => r.x + r.w)) - x0) / C), Hc = Math.ceil((Math.max(...rs.map(r => r.y + r.d)) - y0) / C);
+  if (W * Hc > 250000) return [];
+  const inside = new Uint8Array(W * Hc), done = new Uint8Array(W * Hc);
+  for (let j = 0; j < Hc; j++) for (let i = 0; i < W; i++) { const px = x0 + (i + 0.5) * C, py = y0 + (j + 0.5) * C; if (rs.some(r => px > r.x && px < r.x + r.w && py > r.y && py < r.y + r.d)) inside[j * W + i] = 1; }
+  const total = inside.reduce((t, v) => t + v, 0); let left = total; const out = [];
+  const full = (a0, a1, b0, b1) => { for (let j = b0; j < b1; j++) for (let i = a0; i < a1; i++) if (!inside[j * W + i]) return false; return true; };
+  while (out.length < 8 && left > total * 0.04) {
+    const hg = new Int32Array(W); let best = null; // largest rectangle of uncovered cells (histogram + stack)
+    for (let j = 0; j < Hc; j++) {
+      for (let i = 0; i < W; i++) hg[i] = inside[j * W + i] && !done[j * W + i] ? hg[i] + 1 : 0;
+      const st = [];
+      for (let i = 0; i <= W; i++) { const h = i < W ? hg[i] : 0; let s0 = i;
+        while (st.length && st[st.length - 1][1] >= h) { const [si, sh] = st.pop(); const a = sh * (i - si); if (sh && (!best || a > best.a)) best = { a, i0: si, i1: i, j0: j + 1 - sh, j1: j + 1 }; s0 = si; }
+        st.push([s0, h]); }
+    }
+    if (!best || best.a * C * C < 2) break;
+    let { i0, i1, j0, j1 } = best, grew = true;
+    while (grew) { grew = false;
+      if (i0 > 0 && full(i0 - 1, i0, j0, j1)) { i0--; grew = true; } if (i1 < W && full(i1, i1 + 1, j0, j1)) { i1++; grew = true; }
+      if (j0 > 0 && full(i0, i1, j0 - 1, j0)) { j0--; grew = true; } if (j1 < Hc && full(i0, i1, j1, j1 + 1)) { j1++; grew = true; } }
+    for (let j = j0; j < j1; j++) for (let i = i0; i < i1; i++) if (!done[j * W + i]) { done[j * W + i] = 1; left--; }
+    out.push({ x: x0 + i0 * C, y: y0 + j0 * C, w: (i1 - i0) * C, d: (j1 - j0) * C });
+  }
+  // snap the cell edges back onto the real wall lines
+  const xs = rs.flatMap(r => [r.x, r.x + r.w]), ys = rs.flatMap(r => [r.y, r.y + r.d]);
+  const sn = (v, arr) => { let b = v, bd = C * 0.75; arr.forEach(t => { if (Math.abs(t - v) < bd) { bd = Math.abs(t - v); b = t; } }); return b; };
+  return out.map(q => { const xa = sn(q.x, xs), xb = sn(q.x + q.w, xs), ya = sn(q.y, ys), yb = sn(q.y + q.d, ys); return { x: xa, y: ya, w: xb - xa, d: yb - ya }; }).filter(q => q.w > 0.8 && q.d > 0.8);
+}
+function buildHipRoofs(f, g, y) {
+  const ov = 0.45, pitch = Math.tan(24 * Math.PI / 180), tile = { color: '#b4532f', color2: '#7e3418', pattern: 14, patScale: 0.34, rough: 0.8 };
+  hipRects(f).forEach(q => {
+    const W = q.w + WALL_T + ov * 2, D = q.d + WALL_T + ov * 2, h = Math.min(W, D) / 2 * pitch, cx = q.x + q.w / 2, cz = q.y + q.d / 2;
+    E.part(g, Object.assign({ geo: E.geo('hip', W, h, D), x: cx, y, z: cz }, tile));
+    E.part(g, Object.assign({ geo: E.geo('box', W + 0.02, 0.13, D + 0.02), x: cx, y: y - 0.13, z: cz }, TEAK)); // timber fascia and soffit
+    const rl = Math.abs(W - D); if (rl > 0.05) E.part(g, W >= D ? { geo: E.geo('box', rl + 0.1, 0.09, 0.16), x: cx, y: y + h - 0.03, z: cz, color: '#8f3c1d', rough: 0.8 } : { geo: E.geo('box', 0.16, 0.09, rl + 0.1), x: cx, y: y + h - 0.03, z: cz, color: '#8f3c1d', rough: 0.8 }); // ridge tiles
+  });
 }
 /* roof terrace: slab, tiles, parapet with coping and a water tank — shown with the "Roof" toggle */
 function buildRoof(f, yOff) {
@@ -3428,6 +3516,7 @@ function buildRoof(f, yOff) {
   });
   roofHoles(f).forEach(q => { E.part(g, { geo: E.geo('box', q.w + 0.02, 0.16, q.d + 0.02), x: q.x + q.w / 2, y: H, z: q.y + q.d / 2, color: '#cfc7ba' });
     E.part(g, { geo: E.geo('box', q.w, 0.025, q.d), x: q.x + q.w / 2, y: H + 0.16, z: q.y + q.d / 2, color: '#b49a80', color2: '#8c7a68', pattern: 14, patScale: 0.6, cast: false }); });
+  if (facade().roof === 'hip') { buildHipRoofs(f, g, H + 0.16); return; }
   if (facade().roof !== 'overhang')
   wallLines(f).forEach(L0 => roofRunsOf(f, L0).forEach(sg => {
     const L = { o: L0.o, c: L0.c, a: sg.a, b: sg.b };
@@ -4876,6 +4965,114 @@ const INPUT = {
   'tour-wall-custom': el => { clearTimeout(S._tw); S._tw = setTimeout(() => tourApply([{ do: 'wall_color', room: tourRoom()?.id, color: el.value, name: 'your custom colour' }]), 400); },
 };
 
+/* ---------- AI photo render (Gemini image model) ----------
+   DIMORA photographs the user's own 3D model (aerial outside view, or a cutaway "dollhouse"), and Gemini repaints
+   that picture as a photorealistic render. Starting from the 3D picture keeps the AI to the real plan. */
+const RENDER_STYLES = {
+  mediterranean: { label: 'Mediterranean', desc: 'Terracotta tiled roofs, cream stucco, timber railings', facade: 'mediterranean', sw: ['#eadcc2', '#b4532f', '#5a3a24'] },
+  modern: { label: 'Modern villa', desc: 'White render, stone, timber, flat roofs', facade: 'modern', sw: ['#efeeea', '#c9bba6', '#2b2c2f'] },
+  indian: { label: 'Classic Indian', desc: 'Warm plaster, chajjas, parapets, teak door', facade: 'classic', sw: ['#dacbb2', '#7d7166', '#6b4429'] },
+  kerala: { label: 'Kerala tiled roof', desc: 'Steep clay-tile roofs, white walls, wooden verandahs', facade: 'mediterranean', sw: ['#f3f1ea', '#a9472a', '#7a4a2a'] },
+  match: { label: 'Keep my 3D look', desc: 'Your current colours and materials, made real', facade: null, sw: null },
+};
+const RENDER_SIZE = [1440, 1080]; // 4:3, the aspect ratio asked of Gemini
+const RD = { mode: 'exterior', style: null, light: 'golden', setting: 'white', cam: 'auto', hd: false, notes: '', shot: null, busy: false, cur: null, err: null, list: [], pid: null };
+function renderCam(asp) { // high three-quarter view from the front corner (the side with the main entrance)
+  const vf = viewFrame(), doll = RD.mode === 'dollhouse'; let base = 0, b = vf.b, c = vf.c;
+  try { base = { S: 0, N: Math.PI, E: Math.PI / 2, W: -Math.PI / 2 }[siteRect(homeBounds()).side] ?? 0; } catch (e) { }
+  const hb = houseBounds(); if (hb && hb.w > 1 && hb.d > 1) { b = hb; c = [hb.x + hb.w / 2, vf.c[1], hb.y + hb.d / 2]; } // frame the house, not the whole plot
+  const theta = base - 0.62, phi = doll ? 0.72 : 1.02;
+  const half = Math.min(E.cam.fov / 2, Math.atan(Math.tan(E.cam.fov / 2) * asp));
+  const r = (Math.hypot(b.w, b.d, doll ? 0 : vf.hgt + 2) / 2 + 0.5) / Math.sin(half) * 0.95;
+  return { pos: [c[0] + r * Math.sin(phi) * Math.sin(theta), c[1] + r * Math.cos(phi), c[2] + r * Math.sin(phi) * Math.cos(theta)], target: c };
+}
+function renderShot() { // the picture Gemini gets; the user's own view settings are put back afterwards
+  if (!E || !S.project) return null;
+  const pj = P(), st = RENDER_STYLES[RD.style] || RENDER_STYLES.match, had = k => Object.prototype.hasOwnProperty.call(pj, k);
+  const keep = { roof: S.roof, cutaway: S.cutaway, showAllFloors: S.showAllFloors, explode: S.explode, sel: S.sel, hour: S.hour, labels: S.labels },
+    kp = { facade: [had('facade'), pj.facade], exterior: [had('exterior'), pj.exterior] }, mode = CTL.mode, cam = { pos: E.cam.pos.slice(), target: E.cam.target.slice() };
+  try {
+    CTL.anim = null; S.sel = null; S.explode = false;
+    if (RD.mode === 'dollhouse') { S.cutaway = true; S.roof = false; S.showAllFloors = false; }
+    else { S.cutaway = false; S.roof = true; S.showAllFloors = true; if (st.facade) { pj.facade = st.facade; pj.exterior = null; } }
+    if (isNight() && RD.light !== 'evening') S.hour = 15; // a dark picture gives the AI little to go on
+    if (RD.cam === 'auto') CTL.mode = 'orbit';
+    rebuild();
+    if (RD.cam === 'auto') { const v = renderCam(RENDER_SIZE[0] / RENDER_SIZE[1]); E.cam.pos = v.pos; E.cam.target = v.target; }
+    return E.capture(RENDER_SIZE[0], RENDER_SIZE[1]);
+  } catch (e) { console.warn('render shot', e); return null; }
+  finally {
+    Object.assign(S, keep); CTL.mode = mode; E.cam.pos = cam.pos; E.cam.target = cam.target;
+    Object.entries(kp).forEach(([k, [h, v]]) => { if (h) pj[k] = v; else delete pj[k]; });
+    rebuild(); E.dirty = true;
+  }
+}
+function openRender() {
+  if (!S.project || !E) return toast('Open a home first');
+  if (S.touring) stopTour();
+  if (RD.pid !== P().id) { RD.pid = P().id; RD.cur = null; RD.style = null; }
+  if (!RD.style) RD.style = { mediterranean: 'mediterranean', classic: 'indian', brick: 'match', modern: 'modern' }[P().facade || 'modern'] || 'mediterranean';
+  RD.err = null;
+  const go = () => { if (!RD.busy) RD.shot = renderShot(); paintRender(true); $('#modal').classList.add('on'); API.health().then(() => paintRender()); };
+  if (S.view === '2d') { setView('3d'); setTimeout(go, 120); } else go();
+}
+function paintRender(first) {
+  const card = $('#modal-card'); if (!card || (!first && !$('#rd-wrap'))) return;
+  const ext = RD.mode === 'exterior', cur = RD.cur && RD.cur.pid === P()?.id ? RD.cur : null, av = S.backend?.ai?.render, mine = RD.list.filter(x => x.pid === P()?.id);
+  const opt = (k, v, label) => `<button class="${RD[k] === v ? 'on' : ''}" data-act="rd-set" data-k="${k}" data-v="${v}">${label}</button>`;
+  const name = (P()?.name || 'home').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'home';
+  const stage = cur ? `<div class="cmp"><img src="${cur.img}" alt="AI photo render of your home"><div class="after" id="rd-after" style="width:35%"><img src="${cur.shot}" alt="Your 3D model"></div><span class="lb" style="left:8px">3D model</span><span class="lb" style="right:8px">AI render</span><input type="range" min="0" max="100" value="35" data-act-input="rd-slide" aria-label="Compare the 3D model with the AI render"></div>`
+    : RD.shot ? `<img src="${RD.shot}" alt="The view of your 3D model that Gemini will repaint"><span class="lb" style="left:8px">What Gemini will see</span>` : `<div class="rd-busy"><b>Couldn't take a picture of the 3D view</b></div>`;
+  card.innerHTML = `<button class="x" data-act="modal-close" aria-label="Close">✕</button>
+  <div id="rd-wrap" class="rd-wrap"><p class="eyebrow">AI Photo Render · Google Gemini</p><h2>Turn your 3D home into a photo</h2>
+  <p class="muted rd-sub">DIMORA photographs your 3D model and Gemini repaints it as a realistic render. Your walls, floors, doors and windows stay where your plan has them.</p>
+  <div class="rd-grid"><div class="rd-left">
+    <div class="rd-stage ${RD.busy ? 'busy' : ''}" id="rd-stage">${stage}${RD.busy ? `<div class="rd-busy"><div class="rd-spin"></div><b>Painting your home…</b><small>Usually 10–40 seconds${RD.hd ? ' · HD takes longer' : ''}</small></div>` : ''}</div>
+    ${cur ? `<div class="row rd-actions"><a class="btn sm primary" href="${cur.img}" download="dimora-${name}-render.${/jpe?g/.test(cur.img.slice(5, 20)) ? 'jpg' : 'png'}">⬇ Download</a><button class="btn sm" data-act="rd-go" ${RD.busy ? 'disabled' : ''}>↻ Another version</button><button class="btn sm ghost" data-act="rd-back">✎ Change options</button><span class="muted rd-meta">${esc(cur.model)} · ${(cur.ms / 1000).toFixed(1)} s${cur.remaining != null ? ` · ${cur.remaining} render${cur.remaining === 1 ? '' : 's'} left this hour` : ''}</span></div>
+      <p class="muted rd-disc">AI visualisation: small details can differ from your plan. Drag the slider to compare it with the 3D model.</p>` : ''}
+    ${cur ? '' : `<button class="btn primary rd-go" data-act="rd-go" ${RD.busy || !RD.shot ? 'disabled' : ''}>${RD.busy ? 'Rendering…' : '✨ Render photo'}</button>`}
+    ${RD.err ? `<p class="rd-err">${esc(RD.err)}</p>` : av && !av.available ? `<p class="rd-err">Gemini isn't connected. Add a free key in <a data-act="settings">⚙ Settings</a>, or set GEMINI_API_KEY on the server.</p>` : !S.backendOK && S.backendAt ? `<p class="rd-err">The DIMORA backend is offline. AI renders run on the server.</p>` : ''}
+    ${mine.length > 1 ? `<div class="rd-gal">${mine.map(x => `<button class="${x === cur ? 'on' : ''}" data-act="rd-pick" data-id="${x.id}" title="${esc(RENDER_STYLES[x.style]?.label || x.mode)}"><img src="${x.img}" alt=""></button>`).join('')}</div>` : ''}
+  </div><div class="rd-opts">
+    <label>View</label><div class="seg sm">${opt('mode', 'exterior', '🏡 Outside')}${opt('mode', 'dollhouse', '🏠 Dollhouse (inside)')}</div>
+    ${ext ? `<label>Style</label><div class="rd-styles">${Object.entries(RENDER_STYLES).map(([k, v]) => `<button class="theme ${RD.style === k ? 'on' : ''}" data-act="rd-set" data-k="style" data-v="${k}" title="${esc(v.desc)}"><b>${v.label}</b><div class="dots">${(v.sw || [extColor(), ...facade().sw.slice(1, 3)]).map(c => `<i style="background:${c}"></i>`).join('')}</div></button>`).join('')}</div>`
+      : `<p class="muted rd-hint">Shows the ${esc(FL().name)} with your ${esc(P().theme)} interiors, roof off.</p>`}
+    <label>Light</label><div class="seg sm">${opt('light', 'golden', 'Golden hour')}${opt('light', 'day', 'Daylight')}${opt('light', 'evening', 'Evening')}</div>
+    ${ext ? `<label>Background</label><div class="seg sm">${opt('setting', 'white', 'Clean white')}${opt('setting', 'garden', 'Garden & sky')}</div>` : ''}
+    <label>Camera</label><div class="seg sm">${opt('cam', 'auto', 'Auto aerial')}${opt('cam', 'view', 'My current view')}</div>
+    <label>Quality</label><div class="seg sm">${opt('hd', false, 'Standard')}${opt('hd', true, 'HD · 2K')}</div>
+    <label for="rd-notes">Extra wishes <small>(optional)</small></label><textarea id="rd-notes" maxlength="300" rows="2" placeholder="e.g. blue front door, a swimming pool in the garden, solar panels" data-act-input="rd-notes">${esc(RD.notes)}</textarea>
+  </div></div></div>`;
+}
+async function renderGo() {
+  if (RD.busy || !S.project) return;
+  if (!RD.shot) RD.shot = renderShot(); if (!RD.shot) return;
+  const pj = P(), act = FL(), shot = RD.shot, o = { mode: RD.mode, style: RD.style, light: RD.light, setting: RD.setting, hd: RD.hd, notes: RD.notes.trim() };
+  const floors = (o.mode === 'dollhouse' ? pj.floors.filter(f => f.level <= act.level) : pj.floors).slice().sort((a, b) => a.level - b.level).map(f => ({ name: f.name, rooms: f.rooms.map(r => r.name) }));
+  RD.busy = true; RD.err = null; paintRender();
+  try {
+    const j = await API.req('/api/render', { body: Object.assign({ image: shot, theme: pj.theme, floors, aspect: '4:3' }, o), timeout: 240000 });
+    const item = Object.assign({ id: uid('rd'), pid: pj.id, img: j.image, shot, model: j.model, ms: j.ms, remaining: j.remaining, at: Date.now() }, o);
+    RD.list.unshift(item); RD.list = RD.list.slice(0, 8); RD.cur = item;
+    if (!$('#rd-wrap')) toast('Your AI render is ready. Open 📸 AI Render to see it.', 5000);
+  } catch (e) {
+    RD.err = e.code === 'offline' ? 'The DIMORA backend is offline. AI renders run on the server.' : e.code === 'timeout' ? 'Gemini took too long. Please try again.' : e.message;
+    if (!$('#rd-wrap')) toast('AI render failed: ' + RD.err, 5000);
+  } finally { RD.busy = false; paintRender(); }
+}
+Object.assign(ACT, {
+  'render-open': () => openRender(),
+  'rd-set': el => { if (RD.busy) return; const k = el.dataset.k; let v = el.dataset.v; if (v === 'true' || v === 'false') v = v === 'true';
+    RD[k] = v; RD.cur = null; RD.err = null; if (['mode', 'style', 'cam'].includes(k)) RD.shot = renderShot(); paintRender(); },
+  'rd-go': () => renderGo(),
+  'rd-back': () => { RD.cur = null; RD.shot = renderShot(); paintRender(); },
+  'rd-pick': el => { const x = RD.list.find(i => i.id === el.dataset.id); if (x) { RD.cur = x; paintRender(); } },
+});
+Object.assign(INPUT, {
+  'rd-notes': el => { RD.notes = el.value; },
+  'rd-slide': el => { const a = $('#rd-after'); if (a) a.style.width = el.value + '%'; },
+});
+
 /* ---------- installable app (PWA) ---------- */
 const PWA = { prompt: null };
 function initPWA() {
@@ -4914,7 +5111,7 @@ function boot() {
   if (store.get('g_redirect', 0)) { store.set('g_redirect', 0); initFirebase().then(fb => fb && fb.getRedirectResult()).then(r => { if (r && r.user) finishGoogleSignIn(r.user); }).catch(e => { AUTH.err = fbErr(e); show('login'); renderAuth(); }); }
   else if (currentUser()?.method === 'google') restoreGoogleSession();
   if (CLOUD.token && currentUser()?.method === 'cloud') API.req('/api/auth/me', { timeout: 10000 }).then(j => { const u = store.get('user', null); if (u && j.user) { u.name = j.user.name || u.name; if (j.user.prefs && j.user.prefs.answers) u.answers = j.user.prefs.answers; store.set('user', u); updateUserChips(); } setSyncChip('ok'); }).catch(() => { });
-  window.DIMORA = { ACT, CHANGE, CLOUD, isCloud, openWorkspace, S, E: () => E, CTL: () => CTL, rebuild, askAria, localParse, analyzeSpace, analyzeLight, homeCost, archChecks, sampleHome, startTour, stopTour, setView, TOUR, show, resetUpload, execActions, floorY, stairEnd, stairFoot, sampleDuplex, tourOrder, drawPlanImage, withProject, renderAuth, save, transformRoom, _fs: { fsPut, fsGet, fsDel, fsList }, edgePlan, applyEdge, resizeRoomTo, fitStairs, stairWallCross, overlapping, tidyRooms, wallLines, walkCollide };
+  window.DIMORA = { ACT, CHANGE, CLOUD, isCloud, openWorkspace, S, E: () => E, CTL: () => CTL, rebuild, askAria, localParse, analyzeSpace, analyzeLight, homeCost, archChecks, sampleHome, startTour, stopTour, setView, TOUR, show, resetUpload, execActions, floorY, stairEnd, stairFoot, sampleDuplex, tourOrder, drawPlanImage, withProject, renderAuth, save, transformRoom, _fs: { fsPut, fsGet, fsDel, fsList }, edgePlan, applyEdge, resizeRoomTo, fitStairs, stairWallCross, overlapping, tidyRooms, wallLines, walkCollide, openRender, renderShot, RD, hipRects };
 }
 
 /* ===================== LOGIN PORTAL (Gmail) & INTRO QUESTIONS ===================== */

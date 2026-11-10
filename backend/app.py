@@ -20,7 +20,7 @@ from dimora_core.planner.analysis import analyze, tour_order
 from dimora_core.vision.loader import UploadError, data_url_to_image, to_jpeg_b64
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
-VERSION = "2.11.0"
+VERSION = "2.12.0"
 log = logging.getLogger("dimora")
 
 
@@ -28,6 +28,8 @@ def create_app(store: Store | None = None) -> Flask:
     app = Flask(__name__, static_folder=None)
     db = store or Store()
     auth_limit = SlidingWindowLimiter(per_hour=40, per_day=0)  # sign-in / sign-up attempts per IP
+    # AI photo renders paid with the server's Gemini key: a separate, smaller allowance on a public site
+    render_limit = SlidingWindowLimiter(settings.render_per_hour, settings.render_per_day) if settings.public else None
     app.config["MAX_CONTENT_LENGTH"] = settings.max_upload_mb * 1024 * 1024
 
     # ---------- plumbing ----------
@@ -232,6 +234,25 @@ def create_app(store: Store | None = None) -> Flask:
         img = data_url_to_image(b["image"])
         out = services.inspiration(ai, to_jpeg_b64(img, 900), b.get("styles", []), b.get("floors", []), b.get("finishes", []))
         return jsonify(**out, via=ai.used)
+
+    @app.post("/api/render")
+    def render_ep():
+        """AI photo render: repaint a screenshot of the user's 3D model as a photorealistic image."""
+        b = body()
+        if not isinstance(b.get("image"), str) or not b["image"].startswith("data:image"):
+            raise UploadError("Send the 3D view as 'image' (a data:image URL).")
+        img = data_url_to_image(b["image"])
+        ai = ai_client()
+        metered = render_limit is not None and not request.headers.get("X-Gemini-Key")
+        if metered:
+            need = 3 if b.get("hd") else 1  # an HD render costs several standard ones
+            left = render_limit.remaining(visitor())
+            if (left is not None and left < need) or not all(render_limit.check(visitor()) for _ in range(need)):
+                raise AIUnavailable("You've used this hour's free AI renders" + (" (an HD render needs 3)" if need > 1 else "") +
+                                    ". Try again later, or add your own Gemini API key in ⚙ Settings.")
+        t0 = time.time()
+        out = services.photo_render(ai, to_jpeg_b64(img, 1536), b)
+        return jsonify(**out, ms=round((time.time() - t0) * 1000), remaining=render_limit.remaining(visitor()) if metered else None)
 
     @app.post("/api/report-summary")
     def report_summary():
