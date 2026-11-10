@@ -4462,8 +4462,8 @@ async function sendChat(text) {
 /* ---------- dashboard / onboarding / settings ---------- */
 function confirmDel(id) { const t = Date.now(); if (confirmDel.id === id && t - confirmDel.t < 4000) { confirmDel.id = null; return true; } confirmDel.id = id; confirmDel.t = t; toast('Click delete again to remove this project'); return false; }
 function renderDash() {
-  const pf = S.prefs; const cu = currentUser(); $('#dash-hello').textContent = cu ? `Welcome, ${firstName(cu)}` : 'Welcome to DIMORA'; updateUserChips();
-  $('#dash-prefs').innerHTML = `<span>Style <b>${pf.style}</b></span><span>Budget <b>${inr(pf.budget)}</b></span><span>Family <b>${pf.family}</b></span>${pf.kids ? '<span><b>Kids</b></span>' : ''}${pf.pets ? '<span><b>Pets</b></span>' : ''}${pf.wfh ? '<span><b>Works from home</b></span>' : ''}<span>Storage <b>${pf.storage}</b></span><span>Furniture <b>${pf.furniture}</b></span>`;
+  const cu = currentUser(); $('#dash-hello').textContent = cu ? `Welcome, ${firstName(cu)}` : 'Welcome to DIMORA'; updateUserChips();
+  $('#dash-prefs').innerHTML = ''; // the preference chips (style, budget, family…) are no longer shown here; the box still holds the AI notice
   const own = projOwner(); const local = store.get('projects', []).filter(p => (p.owner || 'device') === own);
   const merged = local.slice(); (CLOUD.list || []).forEach(c => { const i = merged.findIndex(p => p.id === c.id); if (i < 0) merged.push(Object.assign({ cloud: true }, c)); else if (c.updated > merged[i].updated) merged[i] = Object.assign({}, merged[i], c, { cloud: true }); });
   const list = merged.sort((a, b) => b.updated - a.updated);
