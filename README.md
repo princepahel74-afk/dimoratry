@@ -143,6 +143,23 @@ docs/DSA.md                   every data structure and algorithm, with complexit
 samples/                      two one-floor plans to try
 ```
 
+## Real walls, real stairs, real-home feel (v2.11)
+- **Rooms never overlap.** In the 2D plan, dragging a room's edge works like moving a real wall:
+  - a smaller room that shares that wall resizes along with it (e.g. widen Bedroom 2 and its attached bath gets narrower);
+  - any other room is a hard stop, and the plan shows "Stopped by …";
+  - doors and windows in the moved wall travel with it, and furniture stays inside the room.
+- **Moving a room** onto another one turns it red; letting go puts it back where it was. A new room can't be drawn on top of an existing one.
+- **Typed sizes and Aria** ("make the guest room 6 × 6") follow the same rules. If one side is blocked, the room grows the other way, or stops and says what is in the way.
+- **Stairs stay inside walls.** After any edit, each staircase is fitted inside the room it stands in (shortened to a minimum of 2.2 m, or turned, if needed). It also slides so no upstairs wall crosses the stair opening. A room holding a staircase can't be shrunk smaller than the flight needs.
+- **Feels like a home, not a game:**
+  - warm indoor light instead of blue-grey walls;
+  - natural walking speed that eases in and out, with a normal (60°) field of view;
+  - you can't walk through beds and sofas;
+  - ceiling fans in living rooms and bedrooms, and modular switch boards beside doors;
+  - calmer wood floors, more natural trees and lawn, and light room labels;
+  - furniture settles into place instead of dropping from the sky;
+  - plain wording ("arrow keys to walk") instead of gaming terms.
+
 ## Indian design styles & realism (v2.10)
 - **Softer, more realistic furniture:** a rounded-box mesh gives mattresses, cushions and upholstery soft rounded edges; wood and cabinets get a small bevel. Ambient occlusion is gentler and cleaner. The *Low* graphics setting keeps plain boxes for weak devices.
 - **Two Indian themes** (Design → Theme, or ask Aria, e.g. "give my home a traditional Indian look"):

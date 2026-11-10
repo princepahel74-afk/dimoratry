@@ -20,7 +20,7 @@ from dimora_core.planner.analysis import analyze, tour_order
 from dimora_core.vision.loader import UploadError, data_url_to_image, to_jpeg_b64
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
-VERSION = "2.10.1"
+VERSION = "2.11.0"
 log = logging.getLogger("dimora")
 
 

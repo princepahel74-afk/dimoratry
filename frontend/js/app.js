@@ -100,7 +100,7 @@ precision highp float;
 precision highp sampler2DShadow;
 in vec3 vW; in vec3 vN; in vec4 vL;
 uniform vec3 uColor, uColor2, uEmissive, uCam;
-uniform float uAlpha, uPatScale, uAmb, uFog, uHL, uRough, uMetal, uExposure, uShadowTexel, uBump;
+uniform float uAlpha, uPatScale, uAmb, uFog, uHL, uRough, uMetal, uExposure, uShadowTexel, uBump, uWarm;
 uniform int uPattern, uShadowOn, uNL;
 uniform sampler2DShadow uShadow;
 uniform vec3 uLP[16]; uniform vec3 uLC[16]; uniform float uLR[16];
@@ -145,10 +145,10 @@ void main(){
   bool glass = false;
   if(uPattern==1){ // wood planks
     float row=floor(uv.y); float along=uv.x+h21(vec2(row,7.0))*6.0; float seg=floor(along/6.0);
-    float t=h21(vec2(row,seg)); base*=0.82+0.3*t; base=mix(base, c2, 0.25*h21(vec2(seg,row*3.1)));
-    float grain=fbm(vec2(along*0.6, uv.y*14.0)+t*10.0); base*=0.86+0.24*grain;
+    float t=h21(vec2(row,seg)); base*=0.91+0.15*t; base=mix(base, c2, 0.12*h21(vec2(seg,row*3.1)));
+    float grain=fbm(vec2(along*0.6, uv.y*14.0)+t*10.0); base*=0.9+0.17*grain;
     float fy=fract(uv.y), fx=fract(along/6.0);
-    float gap = (fy<0.03||fy>0.988||fx<0.004) ? 1.0 : 0.0; base*=1.0-0.38*gap;
+    float gap = (fy<0.03||fy>0.988||fx<0.004) ? 1.0 : 0.0; base*=1.0-0.28*gap;
     h = -gap*0.0015*uPatScale + grain*0.00025; rough = 0.42 + 0.2*grain;
   } else if(uPattern==2){ // tiles with grout
     vec2 g=fract(uv); float e=min(min(g.x,1.0-g.x),min(g.y,1.0-g.y));
@@ -266,6 +266,8 @@ void main(){
   float hemi = N.y*0.5+0.5;
   vec3 bounce = mix(uGroundCol, uHorizon*0.8, 0.6);  // light bounced up from ground/floors (kept neutral so ceilings stay white)
   vec3 ambL = mix(bounce, mix(uHorizon, uZenith, 0.5)*1.05, hemi)*uAmb;
+  // indoors light arrives bounced off warm floors, walls and curtains: neutral-warm, not sky-blue
+  ambL = mix(ambL, dot(ambL, vec3(0.2126,0.7152,0.0722))*vec3(1.07,0.99,0.88)*1.06, uWarm);
   vec3 Fa = F0 + (max(vec3(1.0-rough), F0) - F0)*pow(1.0-NdV, 5.0);
   vec3 col = albedo*(1.0-uMetal)*ambL*(1.0-Fa*0.5);
   // sun
@@ -382,7 +384,7 @@ class Engine {
     this.progDepth = this._prog(VS_DEPTH, FS_DEPTH);
     this.progSky = this._prog(VS_FULL, FS_SKY);
     const skyU = ['uZenith', 'uHorizon', 'uGroundCol', 'uSunCol', 'uSunDir', 'uNight', 'uClouds', 'uExposure'];
-    this.uMain = this._uniforms(this.progMain, ['uModel', 'uVP', 'uLVP', 'uColor', 'uColor2', 'uEmissive', 'uCam', 'uAlpha', 'uPatScale', 'uAmb', 'uFog', 'uHL', 'uRough', 'uMetal', 'uShadowTexel', 'uBump', 'uPattern', 'uShadowOn', 'uNL', 'uShadow', 'uLP[0]', 'uLC[0]', 'uLR[0]', ...skyU]);
+    this.uMain = this._uniforms(this.progMain, ['uModel', 'uVP', 'uLVP', 'uColor', 'uColor2', 'uEmissive', 'uCam', 'uAlpha', 'uPatScale', 'uAmb', 'uFog', 'uHL', 'uRough', 'uMetal', 'uShadowTexel', 'uBump', 'uWarm', 'uPattern', 'uShadowOn', 'uNL', 'uShadow', 'uLP[0]', 'uLC[0]', 'uLR[0]', ...skyU]);
     this.uDepth = this._uniforms(this.progDepth, ['uModel', 'uLVP']);
     this.uSky = this._uniforms(this.progSky, ['uInvVP', ...skyU]);
     try {
@@ -648,7 +650,7 @@ class Engine {
     gl.uniform1f(U.uFog, env.fog);
     gl.uniform3fv(U.uCam, this.cam.pos); gl.uniform1f(U.uAmb, env.amb);
     gl.uniform1i(U.uShadowOn, shadowsOn ? 1 : 0); gl.uniform1f(U.uShadowTexel, 1 / this.shadowSize);
-    gl.uniform1f(U.uBump, this.Q.bump);
+    gl.uniform1f(U.uBump, this.Q.bump); gl.uniform1f(U.uWarm, env.warm || 0);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.shadowTex); gl.uniform1i(U.uShadow, 0);
     const L = this.lights, lp = new Float32Array(48), lc = new Float32Array(48), lr = new Float32Array(16);
     L.forEach((l, i) => { lp.set(l.p, i * 3); lc.set(l.c, i * 3); lr[i] = l.r; });
@@ -824,11 +826,13 @@ class Controls {
       return true;
     }
     if (this.mode === 'walk' && this.enabled) {
-      const k = this.keys, sp = (k.shift ? 3.2 : 1.8) * dt;
-      let f = 0, s = 0;
-      if (k.w || k.arrowup) f += sp; if (k.s || k.arrowdown) f -= sp; if (k.a) s -= sp; if (k.d) s += sp;
-      if (k.arrowleft) this.walk.yaw += dt * 1.6; if (k.arrowright) this.walk.yaw -= dt * 1.6;
-      if (f || s || k.arrowleft || k.arrowright) { this.move(f, s); this.apply(); return true; }
+      // a calm walking pace (≈1.3 m/s, 2.2 m/s hurrying) that eases in and out, and an unhurried turn
+      const k = this.keys, top = k.shift ? 2.2 : 1.3, v = this.vel || (this.vel = { f: 0, s: 0, t: 0 });
+      const tf = ((k.w || k.arrowup ? 1 : 0) - (k.s || k.arrowdown ? 1 : 0)) * top, ts = ((k.d ? 1 : 0) - (k.a ? 1 : 0)) * top * 0.8, tt = ((k.arrowleft ? 1 : 0) - (k.arrowright ? 1 : 0)) * 1.25;
+      const ease = Math.min(1, dt * 7); v.f += (tf - v.f) * ease; v.s += (ts - v.s) * ease; v.t += (tt - v.t) * Math.min(1, dt * 9);
+      if (Math.abs(v.f) < 0.01 && !tf) v.f = 0; if (Math.abs(v.s) < 0.01 && !ts) v.s = 0; if (Math.abs(v.t) < 0.01 && !tt) v.t = 0;
+      if (v.t) this.walk.yaw += v.t * dt;
+      if (v.f || v.s || v.t) { if (v.f || v.s) this.move(v.f * dt, v.s * dt); this.apply(); return true; }
     }
     if (this.mode === 'orbit' && this.enabled && (!this.kbd || this.kbd())) {
       // keyboard flying around the house: W A S D / arrows glide, Q E circle, Z X zoom, T G tilt, Shift = faster
@@ -2371,6 +2375,42 @@ function alignAndConnectFloors(floors, offsets) {
   floors.forEach(f => f.stairs = []);
   for (let k = 0; k < floors.length - 1; k++) placeStairs(floors[k], floors[k + 1]);
 }
+/* Keep every staircase inside walls. A flight stays within the room it starts in (shorter or turned if that room
+   got smaller), leaves room to step on at the bottom, and slides so no wall upstairs runs across the opening. */
+function stairWallCross(st, up, lines = up ? wallLines(up) : []) { // metres of upstairs wall running through the opening a flight climbs into
+  const ft = stairFoot(st), m = 0.06; let n = 0;
+  lines.forEach(L => { if (L.o === 'h' && L.c > ft.y + m && L.c < ft.y + ft.d - m) n += Math.max(0, Math.min(L.b, ft.x + ft.w) - Math.max(L.a, ft.x));
+    if (L.o === 'v' && L.c > ft.x + m && L.c < ft.x + ft.w - m) n += Math.max(0, Math.min(L.b, ft.y + ft.d) - Math.max(L.a, ft.y)); });
+  return n;
+}
+function fitStairs(f) {
+  if (!f || !f.stairs || !f.stairs.length) return; const up = floorAbove(f), inset = WALL_T / 2 + 0.02, UL = up ? wallLines(up) : [];
+  f.stairs.forEach(st => {
+    const ft0 = stairFoot(st), cen = r => Math.hypot(r.x + r.w / 2 - st.x, r.y + r.d / 2 - st.y);
+    // the room(s) the flight mostly stands in, best first; it must end up wholly inside one of them
+    const hosts = f.rooms.filter(r => !isOpenAir(r) && (rectOverlap(r, ft0) > 0.01 || inRoom(r, st.x, st.y))).sort((a, b) => (rectOverlap(b, ft0) - rectOverlap(a, ft0)) || (cen(a) - cen(b)));
+    if (!hosts.length) return;
+    const fits = (s, host) => { const ft = stairFoot(s), x0 = host.x + inset - 0.01, y0 = host.y + inset - 0.01; return ft.x >= x0 && ft.y >= y0 && ft.x + ft.w <= host.x + host.w - inset + 0.01 && ft.y + ft.d <= host.y + host.d - inset + 0.01; };
+    const stepOn = (s, host) => { const p = stairEnd(s, 'low', 0.45); return inRoom(host, p[0], p[1]); };
+    if (hosts.some(h => fits(st, h) && stepOn(st, h)) && stairWallCross(st, up, UL) < 0.05) return; // already fine: leave it alone
+    const want = stairLen(st), wid = stairWidth(st); let best = null;
+    hosts.slice(0, 3).forEach((host, hi) => {
+      const box = { x: host.x + inset, y: host.y + inset, w: host.w - 2 * inset, d: host.d - 2 * inset }; if (box.w < 0.75 || box.d < 0.75) return;
+      [stairRun(st), stairRun(st) === 'z' ? 'x' : 'z'].forEach((run, ri) => {
+        const along = run === 'z' ? box.d : box.w, across = run === 'z' ? box.w : box.d; const W = r2(Math.min(wid, across)); if (W < 0.75) return;
+        for (let L = r2(Math.min(want, along)); L >= 2.2 - 1e-6; L = r2(L - 0.2)) {
+          const w = run === 'z' ? W : L, d = run === 'z' ? L : W, nx = Math.max(1, Math.round((box.w - w) / 0.1)), ny = Math.max(1, Math.round((box.d - d) / 0.1));
+          for (let i = 0; i <= nx; i++) for (let j = 0; j <= ny; j++) [st.dir || 1, -(st.dir || 1)].forEach((dir, di) => {
+            const s2 = { id: st.id, x: r2(box.x + w / 2 + (box.w - w) * i / nx), y: r2(box.y + d / 2 + (box.d - d) * j / ny), w, d, run, dir }; const top = stairEnd(s2, 'high', 0.45);
+            const sc = stairWallCross(s2, up, UL) * 10 + (stepOn(s2, host) ? 0 : 4) + (up && !roomAt(top[0], top[1], up) ? 3 : 0) + (want - L) * 1.5 + hi * 0.7 + ri * 0.8 + di * 0.6 + Math.hypot(s2.x - st.x, s2.y - st.y) * 0.15;
+            if (!best || sc < best.sc) best = { sc, s2 };
+          });
+        }
+      });
+    });
+    if (best) { const b = best.s2; Object.assign(st, { x: b.x, y: b.y, w: b.w, d: b.d, run: b.run, dir: b.dir }); }
+  });
+}
 function clearStairFurniture() {
   P().floors.forEach(f => { const holes = [...(f.stairs || []), ...stairsBelow(f)].map(st => { const ft = stairFoot(st); const lw = stairEnd(st, 'low', 0.6), hi = stairEnd(st, 'high', 0.6); return { x: Math.min(ft.x, lw[0], hi[0]) - 0.05, y: Math.min(ft.y, lw[1], hi[1]) - 0.05, w: 0, d: 0, ft, lw, hi }; });
     if (!holes.length) return;
@@ -2587,7 +2627,7 @@ function execActions(actions, focus) {
         case 'theme': { const nm = THEMES[a.name] ? a.name : findWord(String(a.name).toLowerCase(), THEME_WORDS)?.v; if (!nm) { fail.push('theme'); break; } applyTheme(nm, a.room === 'all' || !rooms.length || rooms.length === allRooms().length ? null : rooms); done.push(`Applied the ${nm} theme to ${a.room === 'all' || rooms.length === allRooms().length ? 'the whole home' : rn} — ${THEMES[nm].desc}`); needBuild = true; break; }
         case 'transform': { const r = rooms[0]; const to = ROOM_TYPES[a.to] ? a.to : findWord(String(a.to).toLowerCase(), TRANSFORM_WORDS)?.v; if (!r || !to) { fail.push('transform'); break; } const oldName = r.name; const res = transformRoom(r, to); done.push(`Transformed ${oldName} into a ${ROOM_TYPES[to].label} (${r.furniture.length} new pieces). Estimated cost ${inr(res.before)} → ${inr(res.after)}.`); needBuild = true; break; }
         case 'rename': { const r = rooms[0]; if (!r || !a.name) { fail.push('rename'); break; } r.name = String(a.name).slice(0, 30); done.push(`Renamed to ${r.name}.`); needBuild = true; break; }
-        case 'resize': case 'resize_rel': { const r = rooms[0]; if (!r) { fail.push('resize'); break; } const w = a.do === 'resize' ? +a.w : r2(r.w * a.f), d = a.do === 'resize' ? +a.d : r2(r.d * a.f); if (!(w > 0.8 && d > 0.8 && w < 30 && d < 30)) { fail.push('resize'); break; } const ext = isExteriorPoint(floorOfRoom(r), 'v', r.x + r.w, r.y + r.d / 2) || isExteriorPoint(floorOfRoom(r), 'h', r.y + r.d, r.x + r.w / 2); r.w = snap(w); r.d = snap(d); r.furniture.forEach(it => { it.x = clamp(it.x, r.x + 0.3, r.x + r.w - 0.3); it.y = clamp(it.y, r.y + 0.3, r.y + r.d - 0.3); }); done.push(`Resized ${r.name} to ${r.w} × ${r.d} m.`); if (ext) { structural = true; S.structuralLog.push(`${r.name} was resized through an outer wall — external walls are usually load-bearing; get a structural engineer to review before construction.`); } needBuild = true; break; }
+        case 'resize': case 'resize_rel': { const r = rooms[0]; if (!r) { fail.push('resize'); break; } const w = a.do === 'resize' ? +a.w : r2(r.w * a.f), d = a.do === 'resize' ? +a.d : r2(r.d * a.f); if (!(w > 0.8 && d > 0.8 && w < 30 && d < 30)) { fail.push('resize'); break; } const ext = isExteriorPoint(floorOfRoom(r), 'v', r.x + r.w, r.y + r.d / 2) || isExteriorPoint(floorOfRoom(r), 'h', r.y + r.d, r.x + r.w / 2); const lim = resizeRoomTo(r, snap(w), snap(d)); done.push(lim ? `Resized ${r.name} to ${r.w} × ${r.d} m — that's as far as it goes before it would overlap ${lim.name}.` : `Resized ${r.name} to ${r.w} × ${r.d} m.`); if (ext) { structural = true; S.structuralLog.push(`${r.name} was resized through an outer wall — external walls are usually load-bearing; get a structural engineer to review before construction.`); } needBuild = true; break; }
         case 'budget': { const rs = rooms.length ? rooms : allRooms(); const res = optimizeBudget(rs, +a.amount); done.push(res.ok ? `Optimised ${rs.length === allRooms().length ? 'the home' : rn} to ${inr(res.end)} (from ${inr(res.start)}), within your ${inr(a.amount)} budget. ${res.steps.length} swaps made — see Budget panel.` : `Brought ${rn} down from ${inr(res.start)} to ${inr(res.end)} — the leanest version still exceeds ${inr(a.amount)}.`); S.lastOptimize = res; needBuild = true; break; }
         case 'ceiling': { const tp = CEILINGS[a.type] ? a.type : 'cove'; rooms.forEach(r => r.ceiling = tp); done.push(`Set ${CEILINGS[tp].label.toLowerCase()} in ${rn}.`); needBuild = true; break; }
         case 'lights': { rooms.forEach(r => { r.lights = r.lights || {}; ['ambient', 'task', 'accent'].forEach(k => { if (typeof a[k] === 'boolean') r.lights[k] = a[k]; }); }); done.push(`Updated lighting in ${rn}. Slide the time to evening to see it.`); needBuild = true; break; }
@@ -2839,7 +2879,9 @@ function init3D() {
     if (!S.project) { lastT = t; requestAnimationFrame(loop); return; } // signed out / no home open: nothing to draw
     const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016); lastT = t;
     let moving = CTL.tick(dt);
-    const fovT = (S.touring || CTL.mode === 'walk' ? 68 : 50) * Math.PI / 180; if (Math.abs(E.cam.fov - fovT) > 0.002) { E.cam.fov += (fovT - E.cam.fov) * 0.12; moving = true; }
+    const fovT = (S.touring || CTL.mode === 'walk' ? 60 : 50) * Math.PI / 180; if (Math.abs(E.cam.fov - fovT) > 0.002) { E.cam.fov += (fovT - E.cam.fov) * 0.12; moving = true; }
+    { const rr = (S.touring || CTL.mode === 'walk') && S.project ? roomAt(E.cam.pos[0], E.cam.pos[2]) : null, inside = !!rr && !isOpenAir(rr), wT = isNight() ? 0.3 : inside ? 0.9 : 0.4, w0 = E.env.warm || 0; // warm indoor light while walking inside
+      if (Math.abs(wT - w0) > 0.005) { E.env.warm = w0 + (wT - w0) * 0.1; moving = true; } }
     if (buildAnim) { stepBuildAnim(t); moving = true; }
     if (S.view !== '2d' && (E.dirty || moving)) { E.render(); updateLabels(); updateCompass(); }
     requestAnimationFrame(loop);
@@ -2853,6 +2895,7 @@ function rebuild(opts = {}) {
   const keepSel = S.sel;
   E.clear();
   const pj = S.project; const act = pj.floors[pj.activeFloor];
+  pj.floors.forEach(f => { if (floorAbove(f)) fitStairs(f); }); // stairs never poke through walls, whatever was edited
   const b = homeBounds(); const cx = b.x + b.w / 2, cz = b.y + b.d / 2;
   buildSite(b);
   pj.floors.forEach(f => {
@@ -2918,9 +2961,12 @@ function siteRect(b) {
 }
 function tree(g, x, z, k, i) {
   const h = 2.0 + 0.6 * k; E.part(g, { geo: E.geo('cyl', 0.13 + 0.04 * k, h, 0.55, 10), x, y: 0, z, color: '#5a4434', rough: 0.95 });
-  const blobs = [[0, h + 0.55, 0, 1.0], [0.55, h + 0.25, 0.2, 0.75], [-0.5, h + 0.3, -0.25, 0.78], [0.15, h + 1.15, -0.1, 0.72], [-0.2, h + 0.15, 0.55, 0.68], [0.3, h + 0.2, -0.6, 0.66]];
-  const tint = ['#456f2f', '#3f6a34', '#55783a'][i % 3];
-  blobs.forEach(([dx, dy, dz, r]) => E.part(g, { geo: E.geo('sph', r * (0.9 + 0.35 * k), 14), x: x + dx * (1 + 0.3 * k), y: dy, z: z + dz * (1 + 0.3 * k), color: tint, color2: '#7fa34c', pattern: 16 }));
+  // an irregular canopy of many small clumps reads as a real tree; a few big balls read as a toy one
+  const tint = ['#3e5a2b', '#465f30', '#4f6534'][i % 3], rnd = n => { const v = Math.sin((i + 1) * 12.9898 + n * 78.233) * 43758.5453; return v - Math.floor(v); };
+  for (let n = 0; n < 16; n++) { const a = n * 2.39996, rr = 0.25 + 0.75 * Math.sqrt(rnd(n)), up = rnd(n + 40);
+    const r = (0.36 + 0.24 * rnd(n + 80)) * (0.9 + 0.35 * k), sx = Math.cos(a) * rr * (1 + 0.3 * k), sz = Math.sin(a) * rr * (1 + 0.3 * k);
+    E.part(g, { geo: E.geo('sph', r, 12), x: x + sx, y: h + 0.05 + up * 1.15 * (1 - rr * 0.45), z: z + sz, color: mixHex(tint, n % 3 ? '#2f4422' : '#6b8443', 0.25 * rnd(n + 9)), color2: '#6f8a45', pattern: 16 }); }
+  E.part(g, { geo: E.geo('cyl', 0.05, 0.7, 0.6, 6), x: x + 0.12, y: h - 0.35, z: z - 0.1, rx: 0.5, color: '#5a4434', rough: 0.95 }); // a branch
 }
 function houseBounds() { // footprint of the built rooms only (yards excluded), all floors
   const rs = allRooms().filter(r => !isYard(r)); if (!rs.length) return null;
@@ -2933,7 +2979,7 @@ function buildSite(b) {
   const g = E.addGroup('ground', { kind: 'ground' });
   const ext = extColor(), wallCol = mixHex(ext, '#8a7a66', 0.18), cap = '#d6cdbf', pave = { color: '#c2b8a8', color2: '#8f8678', pattern: 12, patScale: 1, cast: false };
   // lawn (the whole world) and a street in front of the gate
-  E.part(g, { geo: E.geo('box', 260, 0.05, 260), x: cx, y: -0.1, z: cz, color: '#4b6a32', color2: '#66773c', pattern: 11, cast: false });
+  E.part(g, { geo: E.geo('box', 260, 0.05, 260), x: cx, y: -0.1, z: cz, color: '#4d6236', color2: '#68714a', pattern: 11, cast: false });
   const front = r.side, horiz = front === 'N' || front === 'S';
   const roadAt = front === 'N' ? r.z0 - 4.2 : front === 'S' ? r.z1 + 4.2 : front === 'W' ? r.x0 - 4.2 : r.x1 + 4.2;
   E.part(g, horiz ? { geo: E.geo('box', 260, 0.05, 6), x: cx, y: -0.085, z: roadAt, color: '#4a4c4f', pattern: 8, patScale: 2, rough: 0.8, cast: false } : { geo: E.geo('box', 6, 0.05, 260), x: roadAt, y: -0.085, z: cz, color: '#4a4c4f', pattern: 8, patScale: 2, rough: 0.8, cast: false });
@@ -3156,6 +3202,19 @@ function buildGarden(r, f, yOff) {
     E.part(g, { geo: E.geo('cyl', 0.06, 0.6, 1, 10), x: px, y: 0, z: pz, color: '#2a2c2f', metal: 0.5, rough: 0.4 });
     E.part(g, { geo: E.geo('cyl', 0.08, 0.1, 1, 10), x: px, y: 0.6, z: pz, color: '#f2efe6', emissive: isNight() ? '#ffd79a' : '#2e2b25', cast: false }); });
 }
+/* ceiling fan — every Indian home has one in the living room and bedrooms */
+const FAN_ROOMS = ['living', 'bedroom', 'master', 'guest', 'dining', 'study', 'office', 'reading', 'nursery', 'gaming', 'gym'];
+function buildFan(g, H, yOff, room, lit) {
+  const th = roomTheme(room), tn = THEMES[room.theme] ? room.theme : S.project.theme, warm = ['Japandi', 'Indian Contemporary', 'Modern Traditional Indian', 'Bohemian', 'Luxury'].includes(tn), body = tn === 'Industrial' ? '#2e2e30' : '#ecebe7';
+  const blade = warm ? th.wood : tn === 'Industrial' ? '#3a3a3c' : '#e4e2dd', vis = { showBelow: yOff + H - 0.06, cast: false };
+  E.part(g, Object.assign({ geo: E.geo('cyl', 0.075, 0.05, 1, 14), y: H - 0.05, color: body, rough: 0.4 }, vis));        // ceiling canopy
+  E.part(g, Object.assign({ geo: E.geo('cyl', 0.013, 0.3, 1, 8), y: H - 0.35, color: body, metal: 0.4, rough: 0.35 }, vis)); // down-rod
+  E.part(g, Object.assign({ geo: E.geo('cyl', 0.13, 0.085, 1, 20), y: H - 0.43, color: body, metal: 0.25, rough: 0.35 }, vis)); // motor housing
+  E.part(g, Object.assign({ geo: E.geo('cyl', 0.085, 0.03, 1, 16), y: H - 0.46, color: '#f7f3ea', emissive: lit ? '#ffe7bf' : '#000000' }, vis)); // light kit
+  for (let k = 0; k < 3; k++) { const a = k * Math.PI * 2 / 3 + 0.4, R = 0.46;
+    E.part(g, Object.assign({ geo: E.geo('box', 0.62, 0.012, 0.115), x: Math.cos(a) * R, z: -Math.sin(a) * R, y: H - 0.395, ry: a, rx: 0.08, color: blade, color2: mixHex(blade, '#000000', 0.2), pattern: warm ? 1 : 0, patScale: 2, rough: 0.45 }, vis));
+    E.part(g, Object.assign({ geo: E.geo('box', 0.18, 0.02, 0.05), x: Math.cos(a) * 0.17, z: -Math.sin(a) * 0.17, y: H - 0.4, ry: a, color: body, metal: 0.4, rough: 0.35 }, vis)); }
+}
 function buildFloor(f, active) {
   const yOff = floorY(f), H = f.height;
   const cut = S.cutaway ? 1.15 : null;
@@ -3185,7 +3244,9 @@ function buildFloor(f, active) {
         E.part(g, Object.assign({ geo: E.geo('box', r.w - 2 * bw, 0.025, 0.03), y: y + th, z: -r.d / 2 + bw }, es)); E.part(g, Object.assign({ geo: E.geo('box', r.w - 2 * bw, 0.025, 0.03), y: y + th, z: r.d / 2 - bw }, es)); }
       if (ck === 'tray') for (let i = -1; i <= 1; i += 2) for (let j = -1; j <= 1; j += 2) E.part(g, { geo: E.geo('cyl', 0.06, 0.02, 1, 10), x: i * (r.w / 2 - bw / 2), y: y - 0.015, z: j * (r.d / 2 - bw / 2), color: '#ffffff', emissive: lightsOn ? '#ffe2b0' : '#222222', showBelow: yOff + y, cast: false });
     }
-    if ((ck === 'flat' || ck === 'peripheral') && r.type !== 'balcony') E.part(g, { geo: E.geo('cyl', 0.18, 0.03, 1, 16), y: H - 0.03, color: '#ffffff', emissive: lightsOn ? '#fff0d0' : '#1a1a1a', showBelow: yOff + H - 0.1, cast: false });
+    const fan = FAN_ROOMS.includes(r.type) && area(r) >= 6 && Math.min(r.w, r.d) >= 2.2 && !holesUp.some(h => inRoom(h, cx, cz, 0.7));
+    if (fan) buildFan(g, H, yOff, r, lightsOn);
+    else if ((ck === 'flat' || ck === 'peripheral') && r.type !== 'balcony') E.part(g, { geo: E.geo('cyl', 0.18, 0.03, 1, 16), y: H - 0.03, color: '#ffffff', emissive: lightsOn ? '#fff0d0' : '#1a1a1a', showBelow: yOff + H - 0.1, cast: false });
     if (S.overlay === 'heat' && active) { /* handled in 2D */ }
   });
   // walls: two half-slabs per piece, each finished for the room (paint) or the outside (textured plaster)
@@ -3194,7 +3255,12 @@ function buildFloor(f, active) {
   const fc = facade(), FRAME = { color: fc.frame, metal: 0.55, rough: 0.38 };
   const box = (o, len, h, th, along, y, across, extra) => E.part(wg, Object.assign(o === 'h' ? { geo: E.geo('box', len, h, th), x: along, y, z: across } : { geo: E.geo('box', th, h, len), x: across, y, z: along }, extra));
   const isOut = r => !r || isOpenAir(r);
-  wallPieces(f).forEach(p => {
+  // a wall can't stand over a stair opening: cut any stretch that runs across a flight coming up from below
+  const cutHoles = pcs => !holesBelow.length ? pcs : pcs.flatMap(p => { let segs = [[p.a, p.b]];
+    holesBelow.forEach(h => { const [c0, c1, a0, a1] = p.o === 'h' ? [h.y, h.y + h.d, h.x, h.x + h.w] : [h.x, h.x + h.w, h.y, h.y + h.d]; if (p.c <= c0 + 0.06 || p.c >= c1 - 0.06) return;
+      segs = segs.flatMap(([a, b]) => { const lo = Math.max(a, a0), hi = Math.min(b, a1); if (hi - lo < 0.02) return [[a, b]]; const o = []; if (lo - a > 0.05) o.push([a, lo]); if (b - hi > 0.05) o.push([hi, b]); return o; }); });
+    return segs.map(([a, b]) => Object.assign({}, p, { a, b })); });
+  cutHoles(wallPieces(f)).forEach(p => {
     if (p.kind === 'rail') { buildRail(box, p, extCol); return; }
     let y0 = p.y0, y1 = p.y1; if (cut != null) { if (y0 >= cut) return; y1 = Math.min(y1, cut); }
     if (y1 - y0 < 0.01) return;
@@ -3271,6 +3337,14 @@ function buildFloor(f, active) {
     else { E.part(fg, Object.assign({ geo: E.geo('box', WALL_T + 0.03, DOOR_H, 0.06), z: -d.w / 2 + 0.03 }, fx)); E.part(fg, Object.assign({ geo: E.geo('box', WALL_T + 0.03, DOOR_H, 0.06), z: d.w / 2 - 0.03 }, fx)); E.part(fg, Object.assign({ geo: E.geo('box', WALL_T + 0.03, 0.06, d.w), y: DOOR_H - 0.06 }, fx)); }
     // main entrance: canopy, granite step and a wall light on the outside
     const ra = d.o === 'h' ? roomAt(d.x, d.y - 0.3, f) : roomAt(d.x - 0.3, d.y, f), rb = d.o === 'h' ? roomAt(d.x, d.y + 0.3, f) : roomAt(d.x + 0.3, d.y, f);
+    // a modular switch board on the latch side, inside each room (bathroom switches sit outside, as in Indian homes)
+    [[ra, -1], [rb, 1]].forEach(([rm, sg]) => { if (isOut(rm) || rm.type === 'bathroom') return;
+      const lo = d.o === 'h' ? rm.x : rm.y, hi = d.o === 'h' ? rm.x + rm.w : rm.y + rm.d, c0 = d.o === 'h' ? d.x : d.y;
+      const t = [d.w / 2 + 0.17, -(d.w / 2 + 0.17)].find(o => c0 + o > lo + 0.16 && c0 + o < hi - 0.16); if (t == null) return;
+      const across = sg * (WALL_T / 2 + 0.006), pl = (wa, h, dc) => d.o === 'h' ? E.geo('box', wa, h, dc) : E.geo('box', dc, h, wa), at = (al, ac, extra) => Object.assign(d.o === 'h' ? { x: al, z: ac } : { x: ac, z: al }, extra);
+      E.part(fg, at(t, across, { geo: pl(0.2, 0.12, 0.012), y: 1.14, color: '#f3f2ee', rough: 0.35, cast: false }));
+      for (let i = 0; i < 4; i++) E.part(fg, at(t - 0.069 + i * 0.046, across + sg * 0.007, { geo: pl(0.032, 0.052, 0.006), y: 1.174, color: i === 3 ? '#e6e3dc' : '#fbfaf7', rough: 0.3, cast: false }));
+    });
     const outS = isOut(ra) && !isOut(rb) ? -1 : isOut(rb) && !isOut(ra) ? 1 : 0;
     if (outS && (d.main || ground)) {
       const at = (along, across, extra) => Object.assign(d.o === 'h' ? { x: along, z: across } : { x: across, z: along }, extra);
@@ -3530,7 +3604,7 @@ function walkInto(r) {
   const f = floorOfRoom(r), fi = S.project.floors.indexOf(f); if (fi !== S.project.activeFloor) S.project.activeFloor = fi;
   S.view = 'walk'; $('#app').dataset.view = 'walk'; $$('#view-seg button').forEach(b => b.classList.toggle('on', b.dataset.v === 'walk')); renderFloorSeg();
   const sh = roomShot(r); CTL.mode = 'walk'; rebuild(); select({ kind: 'room', id: r.id });
-  CTL.flyTo(sh.pos, sh.target, 1.4, { mode: 'walk' }).then(() => toast(`You're in ${r.name} — W A S D to walk around, drag to look`)); E.dirty = true;
+  CTL.flyTo(sh.pos, sh.target, 1.4, { mode: 'walk' }).then(() => toast(`You're in ${r.name} — use the arrow keys to walk around, drag to look`)); E.dirty = true;
 }
 function roomShot(r, from) {
   const f = floorOfRoom(r), y = floorY(f) + 1.6; const c = [r.x + r.w / 2, floorY(f) + 1.0, r.y + r.d / 2];
@@ -3580,6 +3654,9 @@ function walkCollide(p, np) {
     if (np[0] < site.x0 + m || np[0] > site.x1 - m || np[2] < site.z0 + m || np[2] > site.z1 - m) return false;
   }
   if (flights.some(([st]) => inRoom(stairFoot(st), np[0], np[2]))) return true; // on the flight: side rails already enforced above
+  // furniture is solid: you walk around the bed and the sofa, not through them
+  for (const r of f.rooms) for (const it of r.furniture) { const c = CATALOG[it.type]; if (!c || c.flat || (it.h || c.h) < 0.25) continue; const fp = itemFootprint(it);
+    if (inRoom(fp, np[0], np[2], 0.17) && !inRoom(fp, p[0], p[2], 0.17)) return false; }
   const m = 0.22;
   for (const pc of wallPieces(f)) {
     if (pc.kind === 'lintel' || pc.kind === 'head') continue;
@@ -3594,7 +3671,7 @@ function stepBuildAnim(t) {
   E.groups.forEach(g => {
     if (g.kind === 'wall') { g.sy = Math.max(0.001, e); g.dirtyM = true; }
     if (g.kind === 'door' || g.id.startsWith('doorframe')) g.visible = k > 0.7;
-    if (g.kind === 'item') { if (g.baseY == null) g.baseY = g.y; const kk = clamp((k - 0.45 - (g.x * 0.013 % 0.2)) / 0.4, 0, 1); g.y = g.baseY + (1 - (1 - Math.pow(1 - kk, 3))) * 2.5; g.visible = kk > 0; g.dirtyM = true; }
+    if (g.kind === 'item') { if (g.baseY == null) g.baseY = g.y; const kk = clamp((k - 0.45 - (g.x * 0.013 % 0.2)) / 0.4, 0, 1); g.y = g.baseY + Math.pow(1 - kk, 3) * 0.25; g.visible = kk > 0; g.dirtyM = true; }
   });
   E.dirty = true;
   if (k >= 1) { E.groups.forEach(g => { if (g.baseY != null) { g.y = g.baseY; delete g.baseY; } g.visible = true; g.sy = 1; g.dirtyM = true; }); buildAnim = null; }
@@ -3669,6 +3746,8 @@ function render2D() {
     const hs = 7; [['n', r.x + r.w / 2, r.y], ['s', r.x + r.w / 2, r.y + r.d], ['w', r.x, r.y + r.d / 2], ['e', r.x + r.w, r.y + r.d / 2]].forEach(([k, x, y]) => out.push(`<rect class="handle" data-h="${k}" x="${X(x) - hs}" y="${Y(y) - hs}" width="${hs * 2}" height="${hs * 2}" rx="3"/>`));
     out.push(`<g class="dim"><line x1="${X(r.x)}" y1="${Y(r.y) - 18}" x2="${X(r.x + r.w)}" y2="${Y(r.y) - 18}"/><text x="${X(r.x + r.w / 2)}" y="${Y(r.y) - 23}" text-anchor="middle">${r.w} m</text><line x1="${X(r.x) - 18}" y1="${Y(r.y)}" x2="${X(r.x) - 18}" y2="${Y(r.y + r.d)}"/><text transform="translate(${X(r.x) - 23} ${Y(r.y + r.d / 2)}) rotate(-90)" text-anchor="middle">${r.d} m</text></g>`);
   } }
+  if (drag2 && drag2.kind === 'moveroom' && drag2.bad) { const r = drag2.room; out.push(`<rect x="${X(r.x)}" y="${Y(r.y)}" width="${r.w * s}" height="${r.d * s}" fill="rgba(239,68,68,.18)" stroke="#ef4444" stroke-width="2.5"/><text x="${X(r.x + r.w / 2)}" y="${Y(r.y + r.d / 2) + 38}" text-anchor="middle" font-size="13" font-weight="700" fill="#fca5a5">⚠ Overlaps ${esc(drag2.bad.name)}</text>`); }
+  if (drag2 && drag2.kind === 'resize' && drag2.limit) { const r = drag2.room; out.push(`<text x="${X(r.x + r.w / 2)}" y="${Y(r.y + r.d) + 16}" text-anchor="middle" class="t-s" fill="#fbbf24">Stopped by ${esc(drag2.limit.name)}</text>`); }
   if (drag2 && drag2.kind === 'draw') { const a = drag2.a, b = drag2.b; out.push(`<rect x="${X(Math.min(a[0], b[0]))}" y="${Y(Math.min(a[1], b[1]))}" width="${Math.abs(b[0] - a[0]) * s}" height="${Math.abs(b[1] - a[1]) * s}" fill="rgba(124,58,237,.15)" stroke="#a78bfa" stroke-width="2" stroke-dasharray="6 4"/><text x="${X((a[0] + b[0]) / 2)}" y="${Y((a[1] + b[1]) / 2)}" text-anchor="middle" class="t-s">${r2(Math.abs(b[0] - a[0]))} × ${r2(Math.abs(b[1] - a[1]))} m</text>`); }
   // north arrow & scale bar
   out.push(`<g transform="translate(${V2.w - 46} 46) rotate(${S.project.north || 0})"><circle r="20" fill="#111827" stroke="rgba(255,255,255,.15)"/><path d="M0,-15 L6,6 L0,2 L-6,6 z" fill="#a78bfa"/><text y="-22" text-anchor="middle" class="t-s" font-weight="700">N</text></g>`);
@@ -3687,6 +3766,64 @@ function hit2D(p) {
   return null;
 }
 function nearestWall(p, f = FL()) { let best = null; wallLines(f).forEach(L => { const t = clamp(L.o === 'h' ? p[0] : p[1], L.a, L.b); const d = L.o === 'h' ? Math.hypot(p[0] - t, p[1] - L.c) : Math.hypot(p[0] - L.c, p[1] - t); if (d < 0.45 && (!best || d < best.d)) best = { d, L, t }; }); return best; }
+/* ---------- room edits that behave like real walls: rooms never end up on top of each other ---------- */
+const ROOM_MIN = 0.8;
+function overlapping(r, f = FL()) { return f.rooms.find(q => q !== r && rectOverlap(q, r) > 0.04) || null; }
+/* Moving one edge of room r. A room flush against that edge whose side fits within it (a partition you share)
+   moves with the wall; any other room beside the edge is a hard stop. Doors and windows in the wall travel along. */
+function roomMin(q, V, f) { // a room holding a staircase can't get too small for a (shortened) flight
+  return (floorAbove(f) ? (f.stairs || []) : []).filter(st => inRoom(q, st.x, st.y)).reduce((m, st) => Math.max(m, ((stairRun(st) === 'x') === V ? 2.65 : 0.75) + WALL_T + 0.04), ROOM_MIN);
+}
+function edgePlan(r, side, f = floorOfRoom(r) || FL()) {
+  const V = side === 'e' || side === 'w', out = side === 'e' || side === 's' ? 1 : -1, tol = 0.06;
+  const lo = V ? r.y : r.x, hi = V ? r.y + r.d : r.x + r.w;
+  const E0 = side === 'e' ? r.x + r.w : side === 'w' ? r.x : side === 's' ? r.y + r.d : r.y;
+  const far = side === 'e' ? r.x : side === 'w' ? r.x + r.w : side === 's' ? r.y : r.y + r.d; // the opposite wall stays put
+  const own = roomMin(r, V, f); let min = out > 0 ? far + own : -1e9, max = out > 0 ? 1e9 : far - own; const comove = [], block = [];
+  f.rooms.forEach(q => { if (q === r) return;
+    const s0 = V ? q.y : q.x, s1 = V ? q.y + q.d : q.x + q.w, a = V ? q.x : q.y, b = V ? q.x + q.w : q.y + q.d;
+    if (Math.min(hi, s1) - Math.max(lo, s0) <= tol) return; // not beside this wall
+    const flush = out > 0 ? Math.abs(a - E0) < tol : Math.abs(b - E0) < tol, within = s0 >= lo - tol && s1 <= hi + tol;
+    if (flush && within) { comove.push(q); const qm = roomMin(q, V, f); if (out > 0) max = Math.min(max, b - qm); else min = Math.max(min, a + qm); }
+    else if (out > 0 && a >= E0 - tol) { max = Math.min(max, a); block.push({ q, at: a }); }
+    else if (out < 0 && b <= E0 + tol) { min = Math.max(min, b); block.push({ q, at: b }); }
+  });
+  const ops = [...f.doors, ...f.windows].filter(o => o.o === (V ? 'v' : 'h') && Math.abs((V ? o.x : o.y) - E0) < 0.12 && (V ? o.y : o.x) > lo - 0.05 && (V ? o.y : o.x) < hi + 0.05);
+  const touch = [...f.doors, ...f.windows].filter(o => [r, ...comove].some(q => roomSideOf(q, o.o, o.x, o.y)));
+  return { r, f, side, V, out, E0, far, own, min: Math.min(min, max), max, comove, block, ops, touch };
+}
+function applyEdge(pl, v) {
+  const { r, side, V, out } = pl; v = r2(clamp(v, pl.min, pl.max));
+  if (side === 'e') r.w = r2(v - r.x); else if (side === 's') r.d = r2(v - r.y);
+  else if (side === 'w') { r.w = r2(r.x + r.w - v); r.x = v; } else { r.d = r2(r.y + r.d - v); r.y = v; }
+  pl.comove.forEach(q => { if (out > 0) { if (V) { q.w = r2(q.x + q.w - v); q.x = v; } else { q.d = r2(q.y + q.d - v); q.y = v; } } else { if (V) q.w = r2(v - q.x); else q.d = r2(v - q.y); } });
+  pl.ops.forEach(o => { if (V) o.x = v; else o.y = v; });
+  return v;
+}
+function edgeBlocker(pl, v) { if (Math.abs(v - (pl.far + pl.out * pl.own)) < 0.07) return pl.own > ROOM_MIN + 0.01 ? { name: 'the staircase' } : null; const b = pl.block.find(x => Math.abs(x.at - v) < 0.07); return b ? b.q : pl.comove[0] ? { name: pl.comove[0].name, min: true } : null; }
+/* after a wall moves: furniture stays inside its room, staircases stay inside walls, doors stay on a wall */
+function tidyRooms(rooms, f = FL(), ops = null) {
+  rooms.forEach(r => r.furniture.forEach(it => { const fp = itemFootprint(it), hw = Math.min(fp.w, r.w) / 2, hd = Math.min(fp.d, r.d) / 2; it.x = r2(clamp(it.x, r.x + hw + 0.02, r.x + r.w - hw - 0.02)); it.y = r2(clamp(it.y, r.y + hd + 0.02, r.y + r.d - hd - 0.02)); }));
+  fixOpenings(f, ops || [...f.doors, ...f.windows].filter(o => rooms.some(q => roomSideOf(q, o.o, o.x, o.y)))); fitStairs(f);
+}
+/* doors / windows in `list` that no longer sit on a wall slide back onto the nearest stretch of the same wall line */
+function fixOpenings(f, list) {
+  const lines = wallLines(f), only = new Set(list);
+  const keep = o => { if (!only.has(o)) return true; const c = o.o === 'h' ? o.y : o.x, t = o.o === 'h' ? o.x : o.y, half = o.w / 2 + 0.05;
+    const cand = lines.filter(L => L.o === o.o && Math.abs(L.c - c) < 0.12 && L.b - L.a >= o.w + 0.1);
+    if (!cand.length) return false;
+    const L = cand.find(L => t >= L.a + half - 0.01 && t <= L.b - half + 0.01) || cand.sort((p, q) => Math.min(Math.abs(t - p.a), Math.abs(t - p.b)) - Math.min(Math.abs(t - q.a), Math.abs(t - q.b)))[0];
+    const nt = r2(clamp(t, L.a + half, L.b - half)); if (o.o === 'h') { o.x = nt; o.y = L.c; } else { o.y = nt; o.x = L.c; } return true; };
+  f.doors = f.doors.filter(keep); f.windows = f.windows.filter(keep);
+}
+/* set a room's size from numbers (inspector, Aria): grow east/south first, then west/north if that side is blocked */
+function resizeRoomTo(r, w, d) {
+  const f = floorOfRoom(r) || FL(), rooms = [r], touch = []; let lim = null;
+  const step = (side, val) => { const pl = edgePlan(r, side, f); touch.push(...pl.touch); const got = applyEdge(pl, val); rooms.push(...pl.comove); return Math.abs(got - val) > 0.08 ? (edgeBlocker(pl, got) || { name: 'the wall' }) : null; };
+  if (w != null) { const b = step('e', r.x + w); if (b && w > r.w + 0.05) { const b2 = step('w', r.x + r.w - w); if (b2) lim = b; } else if (b) lim = b; }
+  if (d != null) { const b = step('s', r.y + d); if (b && d > r.d + 0.05) { const b2 = step('n', r.y + r.d - d); if (b2) lim = lim || b; } else if (b) lim = lim || b; }
+  tidyRooms([...new Set(rooms)], f, touch); return lim;
+}
 function edgeSnap(v, axis, except) { let best = null; FL().rooms.forEach(r => { if (r === except) return; (axis === 'x' ? [r.x, r.x + r.w] : [r.y, r.y + r.d]).forEach(e => { if (Math.abs(e - v) < 0.2 && (!best || Math.abs(e - v) < Math.abs(best - v))) best = e; }); }); return best != null ? best : snap(v); }
 function init2D() {
   const el = document.getElementById('plan2d');
@@ -3729,24 +3866,35 @@ function init2D() {
       const r = drag2.room; const dx = snap(p[0] - drag2.p0[0]), dy = snap(p[1] - drag2.p0[1]); if (!drag2.committed && Math.abs(dx) + Math.abs(dy) < 0.05) return; once('Move room');
       const nx = edgeSnap(drag2.r0.x + dx, 'x', r), ny = edgeSnap(drag2.r0.y + dy, 'y', r); const mx = nx - r.x, my = ny - r.y;
       if (!drag2.ops) { const f = FL(); drag2.ops = [...f.doors, ...f.windows].filter(o => roomSideOf(r, o.o, o.x, o.y) && isExteriorPoint(f, o.o, o.o === 'h' ? o.y : o.x, o.o === 'h' ? o.x : o.y)); }
-      r.x = r2(nx); r.y = r2(ny); r.furniture.forEach(it => { it.x = r2(it.x + mx); it.y = r2(it.y + my); }); drag2.ops.forEach(o => { o.x = r2(o.x + mx); o.y = r2(o.y + my); }); render2D(); return;
+      if (!drag2.stairs) drag2.stairs = (FL().stairs || []).filter(st => inRoom(r, st.x, st.y));
+      r.x = r2(nx); r.y = r2(ny); r.furniture.forEach(it => { it.x = r2(it.x + mx); it.y = r2(it.y + my); }); drag2.ops.forEach(o => { o.x = r2(o.x + mx); o.y = r2(o.y + my); }); drag2.stairs.forEach(st => { st.x = r2(st.x + mx); st.y = r2(st.y + my); });
+      drag2.bad = overlapping(r); render2D(); return;
     }
     if (drag2.kind === 'resize') {
       const r = drag2.room, r0 = drag2.r0; once('Resize ' + r.name);
       if (!drag2.warned) { const f = FL(); const mid = drag2.h === 'n' ? ['h', r0.y, r0.x + r0.w / 2] : drag2.h === 's' ? ['h', r0.y + r0.d, r0.x + r0.w / 2] : drag2.h === 'w' ? ['v', r0.x, r0.y + r0.d / 2] : ['v', r0.x + r0.w, r0.y + r0.d / 2]; drag2.ext = isExteriorPoint(f, mid[0], mid[1], mid[2]); drag2.warned = true; }
-      if (drag2.h === 'e') r.w = r2(Math.max(0.8, edgeSnap(p[0], 'x', r) - r.x));
-      if (drag2.h === 's') r.d = r2(Math.max(0.8, edgeSnap(p[1], 'y', r) - r.y));
-      if (drag2.h === 'w') { const nx = Math.min(edgeSnap(p[0], 'x', r), r0.x + r0.w - 0.8); r.w = r2(r0.x + r0.w - nx); r.x = r2(nx); }
-      if (drag2.h === 'n') { const ny = Math.min(edgeSnap(p[1], 'y', r), r0.y + r0.d - 0.8); r.d = r2(r0.y + r0.d - ny); r.y = r2(ny); }
+      // the edge behaves like a real wall: a partition shared with a smaller neighbour moves both rooms; anything else stops it
+      if (!drag2.plan) drag2.plan = edgePlan(r, drag2.h);
+      const want = drag2.h === 'e' || drag2.h === 'w' ? edgeSnap(p[0], 'x', r) : edgeSnap(p[1], 'y', r);
+      const got = applyEdge(drag2.plan, want); drag2.limit = Math.abs(got - want) > 0.08 ? edgeBlocker(drag2.plan, got) : null;
       render2D(); renderInspector(); return;
     }
   });
   el.addEventListener('pointerup', () => {
     if (!drag2) return; const d = drag2; drag2 = null;
-    if (d.kind === 'draw') { const a = d.a, b = d.b; const w = r2(Math.abs(b[0] - a[0])), dd = r2(Math.abs(b[1] - a[1])); if (w >= 0.8 && dd >= 0.8) { commit('Add room'); const r = makeRoom({ name: 'New Room', type: 'empty', x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), w, d: dd }); FL().rooms.push(r); S.sel = { kind: 'room', id: r.id }; setTool('select'); rebuild(); renderInspector(); save(); toast('Room added — set its type in the inspector'); } else render2D(); return; }
+    if (d.kind === 'draw') { const a = d.a, b = d.b; const w = r2(Math.abs(b[0] - a[0])), dd = r2(Math.abs(b[1] - a[1]));
+      const hit = w >= 0.8 && dd >= 0.8 && overlapping({ x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), w, d: dd });
+      if (hit) { render2D(); toast(`That overlaps ${hit.name}. Draw the new room in empty space, or shrink ${hit.name} first.`, 4200); return; }
+      if (w >= 0.8 && dd >= 0.8) { commit('Add room'); const r = makeRoom({ name: 'New Room', type: 'empty', x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), w, d: dd }); FL().rooms.push(r); S.sel = { kind: 'room', id: r.id }; setTool('select'); rebuild(); renderInspector(); save(); toast('Room added — set its type in the inspector'); } else render2D(); return; }
     if (d.kind === 'item' && d.committed) { const nr = roomAt(d.it.x, d.it.y); if (nr && nr !== d.room) { d.room.furniture.splice(d.room.furniture.indexOf(d.it), 1); nr.furniture.push(d.it); } else if (!nr) { d.it.x = d.start[0]; d.it.y = d.start[1]; } }
+    if (d.kind === 'moveroom' && d.committed && d.bad) { // never leave two rooms on top of each other
+      const r = d.room, mx = d.r0.x - r.x, my = d.r0.y - r.y; r.x = d.r0.x; r.y = d.r0.y;
+      r.furniture.forEach(it => { it.x = r2(it.x + mx); it.y = r2(it.y + my); }); (d.ops || []).forEach(o => { o.x = r2(o.x + mx); o.y = r2(o.y + my); }); (d.stairs || []).forEach(st => { st.x = r2(st.x + mx); st.y = r2(st.y + my); });
+      toast(`${r.name} can't sit on top of ${d.bad.name} — moved it back. Drop it in empty space or next to a wall.`, 4200);
+    } else if (d.kind === 'moveroom' && d.committed) fitStairs(FL());
+    if (d.kind === 'resize' && d.committed) { tidyRooms([d.room, ...(d.plan ? d.plan.comove : [])], FL(), d.plan && d.plan.touch); if (d.limit) toast(d.limit.name === 'the staircase' ? `${d.room.name} can't get any smaller — the staircase inside needs this space.` : d.limit.min ? `${d.limit.name} is already as small as a room can be, so the wall stops here.` : `Stopped at ${d.limit.name}'s wall so the rooms don't overlap. Shrink or move ${d.limit.name} to go further.`, 4200); }
     if (d.kind === 'resize' && d.committed && d.ext) { const msg = `${d.room.name}: an outer wall was moved. External walls are typically load-bearing — have a structural engineer review this change.`; S.structuralLog.push(msg); toast('⚠️ Structural warning: outer wall moved — flagged for professional review', 4200); }
-    if (d.kind === 'resize' && d.committed && !d.ext) toast('Partition wall moved. Check adjoining room sizes.');
+    if (d.kind === 'resize' && d.committed && !d.ext && !d.limit) toast(d.plan && d.plan.comove.length ? `Partition wall moved — ${d.plan.comove.map(q => q.name).join(', ')} resized with it.` : 'Partition wall moved. Check adjoining room sizes.');
     if (d.committed) { rebuild(); save(); }
   });
   el.addEventListener('wheel', e => { if (S.view !== '2d') return; e.preventDefault(); const rc = el.getBoundingClientRect(); const px = e.clientX - rc.left, py = e.clientY - rc.top; const p = toPlan(px, py); V2.s = clamp(V2.s * (e.deltaY > 0 ? 0.9 : 1.1), 8, 300); V2.x = p[0] - px / V2.s; V2.y = p[1] - py / V2.s; render2D(); }, { passive: false });
@@ -3982,7 +4130,7 @@ function setView(v, opts = {}) {
   if (v === 'walk') {
     const f = FL(); const con = connectivity(f); const r = con.start || f.rooms[0]; const sh = roomShot(r);
     CTL.mode = 'walk'; rebuild();
-    CTL.flyTo(sh.pos, sh.target, prev === '2d' ? 0.01 : 1.4, { mode: 'walk' }).then(() => toast('Walk mode: W A S D / arrow keys, drag to look'));
+    CTL.flyTo(sh.pos, sh.target, prev === '2d' ? 0.01 : 1.4, { mode: 'walk' }).then(() => toast('Walking — arrow keys (or W A S D) to move, drag to look around'));
   } else {
     const wasWalk = CTL.mode === 'walk'; CTL.mode = 'orbit'; rebuild();
     if (prev === '2d') { fitView(false, true); setTimeout(() => fitView(true), 60); }
@@ -4002,7 +4150,7 @@ function walkOutside(prev) {
   const look = [cx - P0[0], cz - P0[1]], L = Math.hypot(...look) || 1;
   CTL.mode = 'walk'; rebuild(); renderFloorSeg();
   CTL.flyTo([P0[0], y, P0[1]], [P0[0] + look[0] / L, y - 0.05, P0[1] + look[1] / L], prev === '2d' ? 0.01 : 1.6, { mode: 'walk' })
-    .then(() => toast('Walking outside: W A S D / arrows to move · drag to look around · Shift to hurry · walk in through the door', 5000));
+    .then(() => toast('Walking outside — arrow keys to move, drag to look around, walk in through the main door', 5000));
 }
 
 /* ---------- side panels ---------- */
@@ -4615,7 +4763,7 @@ const ACT = {
   'toggle-cut': () => { S.cutaway = !S.cutaway; $('#t-cut').classList.toggle('on', S.cutaway); if (S.cutaway && S.roof) { S.roof = false; $('#t-roof').classList.remove('on'); } rebuild(); },
   'toggle-labels': () => { S.labels = !S.labels; $('#t-lab').classList.toggle('on', S.labels); E.dirty = true; },
   'walk-outside': () => setView('walk', { outside: true }),
-  'kbd-help': () => toast(S.view === 'walk' ? 'Walk: W A S D or arrows to move · drag to look · Shift to hurry' : 'Fly around: W A S D / arrows to glide · Q E to circle · Z X to zoom · T G to tilt · Shift = faster · drag to orbit', 6000),
+  'kbd-help': () => toast(S.view === 'walk' ? 'Walk: arrow keys (or W A S D) to move · drag to look around · hold Shift to walk faster' : 'Fly around: W A S D / arrows to glide · Q E to circle · Z X to zoom · T G to tilt · Shift = faster · drag to orbit', 6000),
   'toggle-roof': () => { S.roof = !S.roof; if (S.roof && S.cutaway) { S.cutaway = false; $('#t-cut').classList.remove('on'); } $('#t-roof').classList.toggle('on', S.roof); rebuild(); },
   'toggle-sun': () => { S.daylightSim = !S.daylightSim; $('#t-sun').classList.toggle('on', S.daylightSim); rebuild(); if (S.daylightSim) toast('Sunlight now enters only through windows & doors — move the time slider'); },
   'play-day': () => { if (S.dayTimer) { clearInterval(S.dayTimer); S.dayTimer = null; return; } if (!S.daylightSim) { S.daylightSim = true; $('#t-sun').classList.add('on'); rebuild(); } let h = 6; S.dayTimer = setInterval(() => { h += 0.08; setHour(h); const lh = $('#lt-h'); if (lh) lh.textContent = fmtHour(h); if (h >= 19.2) { clearInterval(S.dayTimer); S.dayTimer = null; } }, 50); },
@@ -4710,7 +4858,7 @@ const CHANGE = {
   'it-finish': el => { const f = S.sel && findItem(S.sel.id); if (!f) return; commit('Finish'); f.it.finish = el.value || null; rebuild(); save(); },
   'r-name': el => { const r = selRoom(); if (!r) return; commit('Rename'); r.name = el.value; rebuild(); save(); },
   'r-type': el => { const r = selRoom(); if (!r) return; commit('Type'); r.type = el.value; rebuild(); renderInspector(); save(); toast('Type changed — press Furnish to re-plan furniture'); },
-  'r-dim': el => { const r = selRoom(); if (!r) return; const v = clamp(snap(+el.value || 1), 0.8, 30); const ext = el.dataset.k === 'w' ? isExteriorPoint(floorOfRoom(r), 'v', r.x + r.w, r.y + r.d / 2) : isExteriorPoint(floorOfRoom(r), 'h', r.y + r.d, r.x + r.w / 2); commit('Resize'); r[el.dataset.k] = r2(v); if (ext) { S.structuralLog.push(`${r.name}: outer wall moved via dimension edit — external walls are usually load-bearing; get a structural review.`); toast('⚠️ Outer wall moved — flagged for structural review', 3800); } rebuild(); renderInspector(); save(); },
+  'r-dim': el => { const r = selRoom(); if (!r) return; const v = clamp(snap(+el.value || 1), 0.8, 30); const ext = el.dataset.k === 'w' ? isExteriorPoint(floorOfRoom(r), 'v', r.x + r.w, r.y + r.d / 2) : isExteriorPoint(floorOfRoom(r), 'h', r.y + r.d, r.x + r.w / 2); commit('Resize'); const lim = resizeRoomTo(r, el.dataset.k === 'w' ? r2(v) : null, el.dataset.k === 'd' ? r2(v) : null); if (lim) toast(`${r.name} stopped at ${r.w} × ${r.d} m — any bigger would overlap ${lim.name}.`, 4200); if (ext) { S.structuralLog.push(`${r.name}: outer wall moved via dimension edit — external walls are usually load-bearing; get a structural review.`); toast('⚠️ Outer wall moved — flagged for structural review', 3800); } rebuild(); renderInspector(); save(); },
   'r-floor': el => { const r = selRoom(); if (!r) return; commit('Floor'); r.floor = el.value; rebuild(); save(); },
   'op-w': el => { const f = FL(); const o = [...f.doors, ...f.windows].find(x => x.id === S.sel?.id); if (!o) return; commit('Opening'); o.w = clamp(+el.value || 0.9, 0.5, 4); rebuild(); save(); },
   'op-k': el => { const o = FL().windows.find(x => x.id === S.sel?.id); if (!o) return; commit('Window'); o[el.dataset.k] = clamp(+el.value || 0.5, 0, 2.6); rebuild(); save(); },
@@ -4766,7 +4914,7 @@ function boot() {
   if (store.get('g_redirect', 0)) { store.set('g_redirect', 0); initFirebase().then(fb => fb && fb.getRedirectResult()).then(r => { if (r && r.user) finishGoogleSignIn(r.user); }).catch(e => { AUTH.err = fbErr(e); show('login'); renderAuth(); }); }
   else if (currentUser()?.method === 'google') restoreGoogleSession();
   if (CLOUD.token && currentUser()?.method === 'cloud') API.req('/api/auth/me', { timeout: 10000 }).then(j => { const u = store.get('user', null); if (u && j.user) { u.name = j.user.name || u.name; if (j.user.prefs && j.user.prefs.answers) u.answers = j.user.prefs.answers; store.set('user', u); updateUserChips(); } setSyncChip('ok'); }).catch(() => { });
-  window.DIMORA = { ACT, CHANGE, CLOUD, isCloud, openWorkspace, S, E: () => E, CTL: () => CTL, rebuild, askAria, localParse, analyzeSpace, analyzeLight, homeCost, archChecks, sampleHome, startTour, stopTour, setView, TOUR, show, resetUpload, execActions, floorY, stairEnd, stairFoot, sampleDuplex, tourOrder, drawPlanImage, withProject, renderAuth, save, transformRoom, _fs: { fsPut, fsGet, fsDel, fsList } };
+  window.DIMORA = { ACT, CHANGE, CLOUD, isCloud, openWorkspace, S, E: () => E, CTL: () => CTL, rebuild, askAria, localParse, analyzeSpace, analyzeLight, homeCost, archChecks, sampleHome, startTour, stopTour, setView, TOUR, show, resetUpload, execActions, floorY, stairEnd, stairFoot, sampleDuplex, tourOrder, drawPlanImage, withProject, renderAuth, save, transformRoom, _fs: { fsPut, fsGet, fsDel, fsList }, edgePlan, applyEdge, resizeRoomTo, fitStairs, stairWallCross, overlapping, tidyRooms, wallLines, walkCollide };
 }
 
 /* ===================== LOGIN PORTAL (Gmail) & INTRO QUESTIONS ===================== */

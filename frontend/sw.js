@@ -1,7 +1,7 @@
 /* DIMORA service worker: the app opens offline and installs like an app.
    Pages and code are fetched fresh when online (so updates show immediately) and fall back to the
    cached copy when offline. API calls are never cached. */
-const CACHE = 'dimora-v2.10.1';
+const CACHE = 'dimora-v2.11';
 const CORE = ['./', 'index.html', 'css/style.css', 'js/app.js', 'js/main.js', 'assets/logo.svg', 'manifest.webmanifest',
   'assets/icons/icon-192.png', 'assets/icons/icon-512.png'];
 
