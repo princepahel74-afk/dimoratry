@@ -212,7 +212,9 @@ def render_prompt(opts: dict) -> str:
     return (task + keep + "\n" + style + f"LIGHT: {light}.\n"
             + (f"FLOORS AND ROOMS: {_clean(plan, 900)}.\n" if plan else "")
             + (f"CLIENT'S EXTRA WISHES (only if they don't break the rules above): {notes}\n" if notes else "")
-            + "QUALITY: high-end real-estate visualisation, sharp focus, realistic materials and soft, realistic shadows.")
+            + "QUALITY: it must look like a real photograph of a real, lived-in home, not a video game, cartoon, toy or clay "
+              "model: real building materials with natural texture and slight weathering, true-to-life scale and proportions, "
+              "natural light and soft, realistic shadows, sharp focus, high-end real-estate photography.")
 
 
 def photo_render(ai: AIClient, image_b64: str, opts: dict) -> dict:

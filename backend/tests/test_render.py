@@ -56,6 +56,7 @@ def test_render_returns_a_photo_of_the_users_model(gem, client):
     assert seen["images"] == 1 and seen["aspect"] == "4:3" and seen["size"] == "1K" and "IMAGE" in seen["modalities"]
     assert "KEEP EXACTLY" in seen["prompt"] and "terracotta" in seen["prompt"] and "2 storeys" in seen["prompt"]
     assert "First Floor: Bedroom, Terrace" in seen["prompt"]
+    assert "not a video game" in seen["prompt"]
 
 
 def test_hd_uses_the_pro_model_and_skips_draft_images(gem, client):

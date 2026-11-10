@@ -156,6 +156,14 @@ Press **📸 AI Render** in the 3D view (or ask Aria for "a photorealistic rende
 
 **Setup:** uses the same `GEMINI_API_KEY`. Image models have little or no free allowance, so enable billing in Google AI Studio for a public site. Models: `GEMINI_IMAGE_MODEL` (default `gemini-nano-banana-2.1`), `GEMINI_IMAGE_MODEL_HD` (default `gemini-3-pro-image`), and `GEMINI_IMAGE_FALLBACKS`, which are tried in order if a model name isn't found. On a public site (`DIMORA_PUBLIC=1`) renders on your key are limited separately: `DIMORA_RENDER_PER_HOUR` per visitor (default 6; an HD render uses 3) and `DIMORA_RENDER_PER_DAY` for the whole site (default 60). Visitors who paste their own Gemini key in ⚙ Settings are not limited.
 
+## Realistic 3D, not a game look (v2.12)
+- **Ambient occlusion works again.** A comment in the SSAO shader had swallowed a line of code, so the shader never compiled and every device silently lost SSAO and the post-processing pass. Corners, skirting, furniture feet and the joints between walls now get their soft contact shadows. A failed post-processing setup now logs a warning instead of failing silently.
+- **Photographic grade:** after the filmic tone map, colours are slightly desaturated and the white balance is warm-neutral, with a gentle contrast curve, applied to the scene and the sky. The sun is stronger and the flat fill light weaker, so light has a direction. Indoors the fill is dimmer than outside.
+- **Fine model edges:** corners and outlines get a soft dark line, worked out from the depth buffer (the second difference of 1/z is zero on any flat surface). This gives the crisp look of an architect's model, like Revit's shaded views.
+- **Materials:** fabrics have a soft weave instead of pixel noise, wood floors vary less from plank to plank, plain paint has faint unevenness, render walls weather slightly near the ground, and grass is a natural, slightly dry green.
+- **Trees and shrubs:** more, smaller leaf clumps on real limbs, with ragged see-through edges (procedural leaf cut-outs) instead of smooth balls.
+- **A real street around the plot** (3D toolbar → **Street**): footpaths on both sides, neighbouring plots with walls, gates and two-storey houses with windows on every side, rooftop water tanks, and street trees. The neighbours are calm, muted massing so your own house stays the subject. Their repeated parts are merged into one mesh per material (`Engine.mergedBoxes`), so the street adds only about 15 % to the scene. It is skipped on the Low 3D quality.
+
 ## Real walls, real stairs, real-home feel (v2.11)
 - **Rooms never overlap.** In the 2D plan, dragging a room's edge works like moving a real wall:
   - a smaller room that shares that wall resizes along with it (e.g. widen Bedroom 2 and its attached bath gets narrower);

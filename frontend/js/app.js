@@ -89,6 +89,14 @@ vec3 skyCol(vec3 d, bool detail){
   return c;
 }
 vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
+// photographic grade after tone mapping: real cameras see less saturated colour than a game engine shows
+vec3 grade(vec3 c){
+  float l = dot(c, vec3(0.2126,0.7152,0.0722));
+  c = mix(vec3(l), c, 0.82);                        // calmer greens, woods and fabrics
+  c *= vec3(1.015, 1.0, 0.975);                     // warm-neutral white balance (daylight on plaster)
+  c = c*c*(3.0-2.0*c)*0.18 + c*0.82;               // gentle S-curve: deeper shadows, softer highlights
+  return clamp(c, 0.0, 1.0);
+}
 `;
 const VS_MAIN = `#version 300 es
 in vec3 aPos; in vec3 aNor;
@@ -145,8 +153,8 @@ void main(){
   bool glass = false;
   if(uPattern==1){ // wood planks
     float row=floor(uv.y); float along=uv.x+h21(vec2(row,7.0))*6.0; float seg=floor(along/6.0);
-    float t=h21(vec2(row,seg)); base*=0.91+0.15*t; base=mix(base, c2, 0.12*h21(vec2(seg,row*3.1)));
-    float grain=fbm(vec2(along*0.6, uv.y*14.0)+t*10.0); base*=0.9+0.17*grain;
+    float t=h21(vec2(row,seg)); base*=0.94+0.09*t; base=mix(base, c2, 0.08*h21(vec2(seg,row*3.1)));
+    float grain=fbm(vec2(along*0.6, uv.y*14.0)+t*10.0); base*=0.93+0.12*grain;
     float fy=fract(uv.y), fx=fract(along/6.0);
     float gap = (fy<0.03||fy>0.988||fx<0.004) ? 1.0 : 0.0; base*=1.0-0.28*gap;
     h = -gap*0.0015*uPatScale + grain*0.00025; rough = 0.42 + 0.2*grain;
@@ -161,8 +169,10 @@ void main(){
     vec2 g=fract(uv*0.5); float e=min(min(g.x,1.0-g.x),min(g.y,1.0-g.y)); float j = e<0.004 ? 1.0 : 0.0; base*=1.0-0.1*j;
     h = -j*0.001; rough = 0.14;
   } else if(uPattern==4){ // carpet / fabric
-    float f1=h21(floor(vW.xz*160.0)+floor(vW.y*160.0)); base*=0.9+0.2*f1; float f2=fbm((flat_?vW.xz:vec2(vW.x+vW.z,vW.y))*6.0); base*=0.93+0.1*f2;
-    h = f2*0.0012; rough = 0.95;
+    vec2 fq = flat_ ? vW.xz : vec2(vW.x+vW.z, vW.y);
+    float weave = 0.5 + 0.25*(sin(fq.x*900.0) + sin(fq.y*900.0)); float f2 = fbm(fq*5.0);
+    base *= mix(1.0, 0.95 + 0.1*weave, af*0.6); base *= 0.95 + 0.08*f2;
+    h = f2*0.0012 + weave*0.0002*af; rough = 0.95;
   } else if(uPattern==5){ // herringbone
     vec2 cell=floor(uv); vec2 f=fract(uv); float k=mod(cell.x+cell.y,2.0);
     float l = k<0.5? f.x: f.y; float stripe=floor(l*3.0);
@@ -187,11 +197,11 @@ void main(){
   } else if(uPattern==10){ // exterior plaster / textured render
     float n1 = fbm(uv*3.0), n2 = vnoise(uv*90.0), n3 = fbm(uv*0.35);
     base *= 0.93 + 0.07*n1 + 0.04*n2; base *= 0.95 + 0.08*n3;
-    // grime: slightly darker near the base of the wall
+    base *= 0.9 + 0.1*smoothstep(0.02, 0.9, vW.y);   // weathering: slightly darker near the ground
     h = n2*0.0007 + n1*0.0006; rough = 0.93; bk = 1.3;
   } else if(uPattern==11){ // lawn grass
     vec2 p = vW.xz; float n1 = fbm(p*0.35), n2 = mix(0.5, fbm(p*2.2), wa), bl = mix(0.5, h21(floor(p*55.0)), wa*wa);
-    base = mix(base, c2, smoothstep(0.35,0.7,n1)); base *= 0.8 + 0.22*n2 + 0.14*bl;
+    base = mix(base, c2, smoothstep(0.3,0.75,n1)*0.55); base *= 0.86 + 0.16*n2 + 0.1*bl;
     base = mix(base, base*vec3(1.08,1.04,0.82), smoothstep(0.62,0.8,n1)*0.4);
     h = bl*0.004 + n2*0.002; rough = 0.95; bk = 1.0;
   } else if(uPattern==12){ // paving stones (running bond)
@@ -213,9 +223,12 @@ void main(){
     vec2 g=fract(uv); float e=min(min(g.x,1.0-g.x),min(g.y,1.0-g.y)); float j = 1.0-smoothstep(0.015,0.03,e);
     base *= 0.88+0.16*h21(floor(uv)); base *= 0.9+0.15*fbm(uv*4.0); base = mix(base, c2, j); h = -j*0.003; rough = 0.85;
   } else if(uPattern==15){ glass = true; rough = 0.04;
-  } else if(uPattern==16){ // foliage (leaf clumps)
+  } else if(uPattern==16 || uPattern==24){ // foliage (leaf clumps); 24 = tree/shrub clumps with ragged leafy edges
+    if(uPattern==24){ float rim = 1.0 - abs(dot(normalize(vN), normalize(uCam - vW)));
+      float lf = 0.6*vnoise(vW.xz*22.0 + vW.y*17.0) + 0.4*vnoise(vec2(vW.x+vW.z, vW.y)*41.0);
+      if(lf < rim*1.3 - 0.42) discard; }
     vec3 q = vW*4.0; float n = fbm(q.xz+q.y*1.7); float n2 = fbm(vec2(vW.x+vW.y*0.7, vW.z-vW.y*0.6)*7.0);
-    base = mix(base, c2, smoothstep(0.3,0.8,n)); base *= 0.72+0.4*n2; h = n2*0.02; rough = 0.8; bk = 0.6;
+    base = mix(base, c2, smoothstep(0.3,0.8,n)*0.7); base *= (0.66+0.38*n2)*(0.72+0.28*smoothstep(-0.6,0.7,N.y)); h = n2*0.02; rough = 0.8; bk = 0.6;
   } else if(uPattern==18){ // cobblestone setts (driveways)
     vec2 b = uv/0.13; b.x += mod(floor(b.y),2.0)*0.5; vec2 f = fract(b), id = floor(b);
     vec2 q = abs(f-0.5); float edge = smoothstep(0.37,0.47,max(q.x,q.y))*af;
@@ -255,6 +268,9 @@ void main(){
     base = mix(base, c2, m*0.8); base *= 0.97+0.04*fbm(uv*6.0); rough = 0.8;
   } else if(uPattern==17){ // water
     float n = fbm(vW.xz*3.0); h = n*0.004; rough = 0.05;
+  } else if(uPattern==0 && uMetal < 0.5){ // paint, plaster, laminate: faint unevenness, never a flat CG colour
+    vec3 q = vW*1.3; float n = fbm(q.xz + q.y*1.7 + vec2(q.y*0.9, 0.0));
+    base *= 0.975 + 0.045*n; rough = 0.78 + 0.1*n;
   }
   if(uRough >= 0.0) rough = uRough;
   if(uBump > 0.0 && h != 0.0) N = bumpN(N, h*af, uBump*bk);
@@ -301,7 +317,7 @@ void main(){
   col += vec3(uHL)*vec3(1.0,0.75,0.35)*0.35;
   float dist=length(vW-uCam); float fog=1.0-exp(-pow(dist*uFog,2.0));
   col = mix(col, skyCol(-V, false), clamp(fog,0.0,1.0));
-  col = aces(col*uExposure);
+  col = grade(aces(col*uExposure));
   outColor = vec4(pow(col, vec3(1.0/2.2)), alpha);
 }`;
 const VS_DEPTH = `#version 300 es
@@ -315,7 +331,7 @@ precision highp float; in vec2 vUV; uniform mat4 uInvVP; uniform float uExposure
 ${SKY_GLSL}
 out vec4 o;
 void main(){ vec2 p = vUV*2.0-1.0; vec4 a = uInvVP*vec4(p,-1.0,1.0), b = uInvVP*vec4(p,1.0,1.0);
-  vec3 d = normalize(b.xyz/b.w - a.xyz/a.w); vec3 c = aces(skyCol(d, true)*uExposure); o = vec4(pow(c, vec3(1.0/2.2)), 1.0); }`;
+  vec3 d = normalize(b.xyz/b.w - a.xyz/a.w); vec3 c = grade(aces(skyCol(d, true)*uExposure)); o = vec4(pow(c, vec3(1.0/2.2)), 1.0); }`;
 // Screen-space ambient occlusion from the depth buffer (half resolution)
 const FS_SSAO = `#version 300 es
 precision highp float; in vec2 vUV; uniform sampler2D uDepth; uniform mat4 uProj, uInvProj; uniform vec2 uTexel; uniform float uRadius;
@@ -328,7 +344,8 @@ void main(){
   vec3 pr = vpos(vUV+vec2(uTexel.x,0.0)), pl = vpos(vUV-vec2(uTexel.x,0.0)), pu = vpos(vUV+vec2(0.0,uTexel.y)), pd = vpos(vUV-vec2(0.0,uTexel.y));
   vec3 dx = abs(pr.z-P.z) < abs(P.z-pl.z) ? pr-P : P-pl; vec3 dy = abs(pu.z-P.z) < abs(P.z-pd.z) ? pu-P : P-pd;
   vec3 N = normalize(cross(dx, dy)); if(dot(N, -P) < 0.0) N = -N;
-  float an = fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))*6.2832; // interleaved gradient noise: averages out cleanly in the blur vec3 rv = vec3(cos(an), sin(an), 0.0);
+  float an = fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))*6.2832; // interleaved gradient noise: averages out cleanly in the blur
+  vec3 rv = vec3(cos(an), sin(an), 0.0);
   vec3 T = normalize(rv - N*dot(rv,N)); vec3 B = cross(N,T);
   float rad = uRadius; float occ = 0.0;
   for(int i=0;i<14;i++){
@@ -343,7 +360,7 @@ void main(){
   o = vec4(pow(clamp(ao,0.0,1.0), 1.25), 0.0, 0.0, 1.0);
 }`;
 const FS_COMPOSITE = `#version 300 es
-precision highp float; in vec2 vUV; uniform sampler2D uColor, uAO, uDepth; uniform vec2 uAOTexel; uniform int uUseAO; uniform float uAOStrength, uVignette;
+precision highp float; in vec2 vUV; uniform sampler2D uColor, uAO, uDepth; uniform vec2 uAOTexel, uPix; uniform int uUseAO; uniform float uAOStrength, uVignette, uEdge;
 uniform mat4 uInvProj; out vec4 o;
 float vz(vec2 uv){ float z = texture(uDepth, uv).r*2.0-1.0; vec4 p = uInvProj*vec4(uv*2.0-1.0, z, 1.0); return p.z/p.w; }
 void main(){
@@ -355,6 +372,14 @@ void main(){
       float ao = w > 1e-3 ? s/w : texture(uAO, vUV).r;
       c *= mix(1.0, ao, uAOStrength);
     }
+  }
+  if(uEdge > 0.0 && texture(uDepth, vUV).r < 0.9996){
+    // 1/z is linear across any flat surface, so its second difference is ~0 on walls and floors and
+    // spikes only at corners, edges and outlines: a fine, soft line like an architect's model
+    float w0 = 1.0/vz(vUV), wl = 1.0/vz(vUV-vec2(uPix.x,0.0)), wr = 1.0/vz(vUV+vec2(uPix.x,0.0)), wd = 1.0/vz(vUV-vec2(0.0,uPix.y)), wu = 1.0/vz(vUV+vec2(0.0,uPix.y));
+    float lap = (abs(wl+wr-2.0*w0) + abs(wd+wu-2.0*w0))/abs(w0);
+    float z = abs(1.0/w0); float e = smoothstep(0.004, 0.03, lap)*(1.0 - smoothstep(18.0, 55.0, z));
+    c *= 1.0 - uEdge*e;
   }
   vec2 q = vUV-0.5; c *= 1.0 - uVignette*dot(q,q)*1.6;
   o = vec4(c, 1.0);
@@ -389,9 +414,9 @@ class Engine {
     this.uSky = this._uniforms(this.progSky, ['uInvVP', ...skyU]);
     try {
       this.progSSAO = this._prog(VS_FULL, FS_SSAO); this.uSSAO = this._uniforms(this.progSSAO, ['uDepth', 'uProj', 'uInvProj', 'uTexel', 'uRadius', 'uKernel[0]']);
-      this.progComp = this._prog(VS_FULL, FS_COMPOSITE); this.uComp = this._uniforms(this.progComp, ['uColor', 'uAO', 'uDepth', 'uAOTexel', 'uUseAO', 'uAOStrength', 'uVignette', 'uInvProj']);
+      this.progComp = this._prog(VS_FULL, FS_COMPOSITE); this.uComp = this._uniforms(this.progComp, ['uColor', 'uAO', 'uDepth', 'uAOTexel', 'uUseAO', 'uAOStrength', 'uVignette', 'uInvProj', 'uPix', 'uEdge']);
       this.postOK = true;
-    } catch (e) { this.postOK = false; }
+    } catch (e) { this.postOK = false; console.warn('DIMORA: post-processing (SSAO) is off:', e.message || e); }
     this.kernel = new Float32Array(42);
     for (let i = 0; i < 14; i++) { // hemisphere samples, denser near the centre
       const u = (i + 0.5) / 14, a = i * 2.39996, r = Math.sqrt(1 - u * u * 0.85);
@@ -494,7 +519,21 @@ class Engine {
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
     gl.bindVertexArray(null);
-    return { vao, count: pos.length / 3 };
+    return { vao, count: pos.length / 3, buf: b };
+  }
+  // many axis-aligned boxes ({x, y (base), z, w, h, d}) merged into one mesh = one draw call.
+  // Kept per slot and freed when the slot is rebuilt with different boxes.
+  mergedBoxes(slot, list) {
+    const key = list.map(b => [b.x, b.y, b.z, b.w, b.h, b.d].map(v => v.toFixed(2)).join(',')).join(';');
+    this._slots = this._slots || new Map(); const old = this._slots.get(slot);
+    if (old && old.key === key) return old.geo;
+    if (old) { this.gl.deleteVertexArray(old.geo.vao); this.gl.deleteBuffer(old.geo.buf); }
+    const P = [], N = [], f = (v, n) => [0, 1, 2, 0, 2, 3].forEach(i => { P.push(...v[i]); N.push(...n); });
+    list.forEach(b => { const x0 = b.x - b.w / 2, x1 = b.x + b.w / 2, y0 = b.y, y1 = b.y + b.h, z0 = b.z - b.d / 2, z1 = b.z + b.d / 2;
+      f([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1]); f([[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], [0, 0, -1]);
+      f([[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], [1, 0, 0]); f([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0]);
+      f([[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], [0, 1, 0]); f([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0, -1, 0]); });
+    const geo = this._upload(P, N); this._slots.set(slot, { key, geo }); return geo;
   }
   geo(kind, a = 1, b = 1, c = 1, seg = 18) {
     const key = kind + ':' + [a, b, c, seg].map(v => (+v).toFixed(3)).join(':');
@@ -664,7 +703,7 @@ class Engine {
     gl.uniformMatrix4fv(U.uLVP, false, lvp);
     gl.uniform3fv(U.uSunCol, shadowsOn || sd[1] > 0 ? env.sunCol : [0, 0, 0]);
     gl.uniform1f(U.uFog, env.fog);
-    gl.uniform3fv(U.uCam, this.cam.pos); gl.uniform1f(U.uAmb, env.amb);
+    gl.uniform3fv(U.uCam, this.cam.pos); gl.uniform1f(U.uAmb, env.amb * (1 - 0.2 * (env.warm || 0))); // indoors the fill light is dimmer than outdoors
     gl.uniform1i(U.uShadowOn, shadowsOn ? 1 : 0); gl.uniform1f(U.uShadowTexel, 1 / this.shadowSize);
     gl.uniform1f(U.uBump, this.Q.bump); gl.uniform1f(U.uWarm, env.warm || 0);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.shadowTex); gl.uniform1i(U.uShadow, 0);
@@ -714,7 +753,7 @@ class Engine {
       gl.useProgram(this.progSSAO); const S = this.uSSAO;
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, P.depth); gl.uniform1i(S.uDepth, 0);
       gl.uniformMatrix4fv(S.uProj, false, proj); gl.uniformMatrix4fv(S.uInvProj, false, inv);
-      gl.uniform2f(S.uTexel, 1 / P.aw, 1 / P.ah); gl.uniform1f(S.uRadius, this.aoRadius || 0.32); gl.uniform3fv(S.uKernel, this.kernel);
+      gl.uniform2f(S.uTexel, 1 / P.aw, 1 / P.ah); gl.uniform1f(S.uRadius, this.aoRadius || 0.26); gl.uniform3fv(S.uKernel, this.kernel);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H);
@@ -723,7 +762,8 @@ class Engine {
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, P.ao || P.color); gl.uniform1i(C.uAO, 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, P.depth); gl.uniform1i(C.uDepth, 2);
     gl.uniform2f(C.uAOTexel, 1 / (P.aw || W), 1 / (P.ah || H)); gl.uniform1i(C.uUseAO, P.ao ? 1 : 0);
-    gl.uniform1f(C.uAOStrength, 0.6); gl.uniform1f(C.uVignette, this.env.vignette ?? 0.22); gl.uniformMatrix4fv(C.uInvProj, false, inv);
+    gl.uniform1f(C.uAOStrength, 0.65); gl.uniform1f(C.uVignette, this.env.vignette ?? 0.22); gl.uniformMatrix4fv(C.uInvProj, false, inv);
+    gl.uniform2f(C.uPix, 1 / W, 1 / H); gl.uniform1f(C.uEdge, this.edges ?? 0.22);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.activeTexture(gl.TEXTURE0);
     gl.enable(gl.DEPTH_TEST); gl.depthMask(true); gl.bindVertexArray(null);
@@ -2989,14 +3029,20 @@ function siteRect(b) {
   const m = { N: SITE.M, S: SITE.M, E: SITE.M, W: SITE.M }; m[side] = SITE.front;
   return { x0: b.x - m.W, x1: b.x + b.w + m.E, z0: b.y - m.N, z1: b.y + b.d + m.S, side, door: md && md.side ? md.d : null };
 }
-function tree(g, x, z, k, i) {
-  const h = 2.0 + 0.6 * k; E.part(g, { geo: E.geo('cyl', 0.13 + 0.04 * k, h, 0.55, 10), x, y: 0, z, color: '#5a4434', rough: 0.95 });
-  // an irregular canopy of many small clumps reads as a real tree; a few big balls read as a toy one
-  const tint = ['#3e5a2b', '#465f30', '#4f6534'][i % 3], rnd = n => { const v = Math.sin((i + 1) * 12.9898 + n * 78.233) * 43758.5453; return v - Math.floor(v); };
-  for (let n = 0; n < 16; n++) { const a = n * 2.39996, rr = 0.25 + 0.75 * Math.sqrt(rnd(n)), up = rnd(n + 40);
-    const r = (0.36 + 0.24 * rnd(n + 80)) * (0.9 + 0.35 * k), sx = Math.cos(a) * rr * (1 + 0.3 * k), sz = Math.sin(a) * rr * (1 + 0.3 * k);
-    E.part(g, { geo: E.geo('sph', r, 12), x: x + sx, y: h + 0.05 + up * 1.15 * (1 - rr * 0.45), z: z + sz, color: mixHex(tint, n % 3 ? '#2f4422' : '#6b8443', 0.25 * rnd(n + 9)), color2: '#6f8a45', pattern: 16 }); }
-  E.part(g, { geo: E.geo('cyl', 0.05, 0.7, 0.6, 6), x: x + 0.12, y: h - 0.35, z: z - 0.1, rx: 0.5, color: '#5a4434', rough: 0.95 }); // a branch
+function tree(g, x, z, k, i, clumps = 28) { // far-away trees (the street) use fewer clumps
+  const h = 2.0 + 0.6 * k, rnd = n => { const v = Math.sin((i + 1) * 12.9898 + n * 78.233) * 43758.5453; return v - Math.floor(v); };
+  const bark = { color: '#4f3d30', color2: '#3a2c22', pattern: 4, rough: 0.95 };
+  E.part(g, Object.assign({ geo: E.geo('cyl', 0.12 + 0.04 * k, h + 0.4, 0.62, 10), x, y: 0, z }, bark));
+  // a few limbs leaning out, so the canopy sits on branches instead of floating on a pole
+  for (let b = 0; b < 3; b++) { const a = b * 2.1 + rnd(b + 200) * 0.8;
+    E.part(g, Object.assign({ geo: E.geo('cyl', 0.045 + 0.015 * k, 1.0 + 0.3 * k, 0.55, 6), x: x + Math.cos(a) * 0.1, y: h - 0.55, z: z + Math.sin(a) * 0.1, ry: Math.PI - a, rz: 0.75 }, bark)); } // ry = π − a tips each limb outwards along a
+  // the canopy: many small, irregular leaf clumps in mixed greens (a few big balls read as a toy tree)
+  const tint = ['#3b5428', '#43592c', '#4b5d31'][i % 3], W = 1 + 0.3 * k;
+  const big = Math.sqrt(28 / clumps);
+  for (let n = 0; n < clumps; n++) { const a = n * 2.39996, rr = 0.2 + 0.8 * Math.sqrt(rnd(n)), up = rnd(n + 40);
+    const r = (0.26 + 0.2 * rnd(n + 80)) * (0.9 + 0.3 * k) * big, sx = Math.cos(a) * rr * 1.15 * W, sz = Math.sin(a) * rr * 1.15 * W;
+    const y = h + 0.1 + up * 1.35 * W * (1 - rr * 0.5) - (rr > 0.8 ? 0.25 : 0);
+    E.part(g, { geo: E.geo('sph', r, 10), x: x + sx, y, z: z + sz, sy: 0.82 + 0.25 * rnd(n + 120), color: mixHex(tint, rnd(n + 9) < 0.5 ? '#2a3b1d' : '#677a3c', 0.35 * rnd(n + 30)), color2: '#6a7f42', pattern: 24 }); }
 }
 function houseBounds() { // footprint of the built rooms only (yards excluded), all floors
   const rs = allRooms().filter(r => !isYard(r)); if (!rs.length) return null;
@@ -3009,12 +3055,13 @@ function buildSite(b) {
   const g = E.addGroup('ground', { kind: 'ground' });
   const ext = extColor(), wallCol = mixHex(ext, '#8a7a66', 0.18), cap = '#d6cdbf', pave = { color: '#c2b8a8', color2: '#8f8678', pattern: 12, patScale: 1, cast: false };
   // lawn (the whole world) and a street in front of the gate
-  E.part(g, { geo: E.geo('box', 260, 0.05, 260), x: cx, y: -0.1, z: cz, color: '#4d6236', color2: '#68714a', pattern: 11, cast: false });
+  E.part(g, { geo: E.geo('box', 260, 0.05, 260), x: cx, y: -0.1, z: cz, color: '#56633a', color2: '#7d7a50', pattern: 11, cast: false });
   const front = r.side, horiz = front === 'N' || front === 'S';
   const roadAt = front === 'N' ? r.z0 - 4.2 : front === 'S' ? r.z1 + 4.2 : front === 'W' ? r.x0 - 4.2 : r.x1 + 4.2;
   E.part(g, horiz ? { geo: E.geo('box', 260, 0.05, 6), x: cx, y: -0.085, z: roadAt, color: '#4a4c4f', pattern: 8, patScale: 2, rough: 0.8, cast: false } : { geo: E.geo('box', 6, 0.05, 260), x: roadAt, y: -0.085, z: cz, color: '#4a4c4f', pattern: 8, patScale: 2, rough: 0.8, cast: false });
   const kerb = front === 'N' || front === 'W' ? 3 : -3;
   E.part(g, horiz ? { geo: E.geo('box', 260, 0.14, 0.18), x: cx, y: -0.1, z: roadAt + kerb, color: '#bfb9ae', cast: false } : { geo: E.geo('box', 0.18, 0.14, 260), x: roadAt + kerb, y: -0.1, z: cz, color: '#bfb9ae', cast: false });
+  if (S.context !== false && E.quality !== 'low') buildContext(g, r, roadAt, front); // the street is skipped on the lowest 3D quality
   // paved apron hugging the house (not the yards)
   const hb = houseBounds() || b;
   E.part(g, Object.assign({ geo: E.geo('box', hb.w + 1.8, 0.06, hb.d + 1.8), x: hb.x + hb.w / 2, y: -0.075, z: hb.y + hb.d / 2 }, pave));
@@ -3063,7 +3110,7 @@ function buildSite(b) {
   side('h', r.z0, r.x0, r.x1, front === 'N'); side('h', r.z1, r.x0, r.x1, front === 'S'); side('v', r.x0, r.z0, r.z1, front === 'W'); side('v', r.x1, r.z0, r.z1, front === 'E');
   if (r.yards) return; // the drawn garden / parking are landscaped by buildYard
   // garden: hedges along the back and sides, trees in the corners, shrubs by the door
-  const hedge = (o, c, a0, a1) => { const len = a1 - a0; if (len < 1) return; E.part(g, o === 'h' ? { geo: E.geo('box', len, 0.75, 0.6), x: (a0 + a1) / 2, y: -0.06, z: c, color: '#3f6230', color2: '#62863e', pattern: 16 } : { geo: E.geo('box', 0.6, 0.75, len), x: c, y: -0.06, z: (a0 + a1) / 2, color: '#3f6230', color2: '#62863e', pattern: 16 }); };
+  const hedge = (o, c, a0, a1) => { const len = a1 - a0; if (len < 1) return; E.part(g, o === 'h' ? { geo: E.geo('box', len, 0.75, 0.6), x: (a0 + a1) / 2, y: -0.06, z: c, color: '#3b5129', color2: '#5e7339', pattern: 16 } : { geo: E.geo('box', 0.6, 0.75, len), x: c, y: -0.06, z: (a0 + a1) / 2, color: '#3b5129', color2: '#5e7339', pattern: 16 }); };
   const back = { N: 'S', S: 'N', E: 'W', W: 'E' }[front];
   if (back === 'N') hedge('h', r.z0 + 0.55, r.x0 + 2.4, r.x1 - 2.4); if (back === 'S') hedge('h', r.z1 - 0.55, r.x0 + 2.4, r.x1 - 2.4);
   if (back === 'W') hedge('v', r.x0 + 0.55, r.z0 + 2.4, r.z1 - 2.4); if (back === 'E') hedge('v', r.x1 - 0.55, r.z0 + 2.4, r.z1 - 2.4);
@@ -3150,11 +3197,70 @@ function buildBike(id, x, z, ang, col, y) { // a sport motorbike, length along l
   P(E.geo('cyl', 0.05, 0.5, 1, 10), { x: 0.14, y: 0.36, z: -0.55, rx: Math.PI / 2 - 0.25 }, { color: '#c4c8cc', metal: 1, rough: 0.2 }); // exhaust
   P(B(0.12, 0.06, 0.03), { y: 0.86, z: 0.75 }, { color: '#eef3f6', emissive: night ? '#fff1c8' : '#202326', cast: false });
 }
+/* ---------- the street around the plot ----------
+   A house alone in an endless field reads as a game level. Real homes sit in a street: footpaths, neighbouring
+   plots with their own walls and houses, street trees. The neighbours are kept as calm, muted massing (the way
+   architects show context), so the user's own house stays the subject. Deterministic per project. */
+function buildContext(g, r, roadAt, front) {
+  const horiz = front === 'N' || front === 'S', sg = front === 'S' || front === 'E' ? 1 : -1; // +1: the road lies towards +v
+  const u0 = horiz ? r.x0 : r.z0, u1 = horiz ? r.x1 : r.z1, vF = horiz ? (sg > 0 ? r.z1 : r.z0) : (sg > 0 ? r.x1 : r.x0);
+  const depth = Math.max(12, horiz ? r.z1 - r.z0 : r.x1 - r.x0), rnd = seeded('street' + (P().id || '') + front);
+  // (u along the road, v across it) -> world; boxes are given as (length along u, height, length along v)
+  const at = (u, v) => horiz ? [u, v] : [v, u];
+  const MERGE = new Map(); // material -> boxes; every window, door, wall and gate of the street becomes one draw call per material
+  const box = (u, v, lu, h, lv, y, m) => { const [x, z] = at(u, v), w = horiz ? lu : lv, d = horiz ? lv : lu;
+    if (m && m.merge) { if (!MERGE.has(m)) MERGE.set(m, []); MERGE.get(m).push({ x, y, z, w, h, d }); return; }
+    return E.part(g, Object.assign({ geo: E.geo('box', w, h, d), x, y, z, cast: false }, m)); };
+  const path = { color: '#b9b3a8', color2: '#9a948a', pattern: 12, patScale: 0.8, rough: 0.85 }, kerbM = { color: '#c7c1b6' };
+  const L = 150, uc = (u0 + u1) / 2;
+  // footpaths on both sides of the road, and the far kerb
+  box(uc, roadAt - sg * 3.65, L, 0.08, 1.3, -0.09, path);
+  box(uc, roadAt + sg * 3.95, L, 0.1, 1.9, -0.09, path);
+  box(uc, roadAt + sg * 3.05, L, 0.14, 0.18, -0.1, kerbM);
+  const PAL = ['#ddd5c7', '#e4e0d8', '#d2c8b8', '#cdbfa8', '#d9d4cb', '#d6c9b6', '#c9c4bb'];
+  const glass = { color: '#2f3539', rough: 0.15, metal: 0.2, merge: 1 }, frame = { color: '#3b3b3a', rough: 0.6, merge: 1 }, doorM = { color: '#5b4635', rough: 0.6, merge: 1 };
+  const wallM = { color: '#c9c0b2', pattern: 10, merge: 1 }, gateM = { color: '#2a2b2d', metal: 0.6, rough: 0.45, merge: 1 }, copeM = { color: '#cfc8bc', merge: 1 }, slabM = { color: '#d9d3c8', merge: 1 };
+  const tank = { color: '#1f2224', rough: 0.5 };
+  const neighbour = (ua, ub, vNear, dir) => { // one plot: boundary walls, a house set back from the street, a tree
+    const w = ub - ua, um = (ua + ub) / 2, col = PAL[Math.floor(rnd() * PAL.length)];
+    box(um, vNear - dir * 0.1, w - 0.2, 1.1, 0.2, -0.06, wallM); // front wall with a dark steel gate
+    box(ua + w * 0.25, vNear - dir * 0.1, 3, 1.2, 0.08, -0.05, gateM);
+    [ua, ub].forEach(t => box(t, vNear - dir * depth / 2, 0.2, 1.1, depth - 0.2, -0.06, wallM));
+    const set = 3 + rnd() * 1.5, hw = Math.max(5, w - 3.6 - rnd() * 1.4), hd = Math.min(depth - set - 2.5, 8.5 + rnd() * 3), st = rnd() < 0.7 ? 2 : 1, H = st * 3.1;
+    const hu = um + (rnd() - 0.5) * Math.max(0, w - hw - 3.2), hv = vNear - dir * (set + hd / 2);
+    box(hu, hv, hw, H, hd, -0.06, { color: col, pattern: 10, cast: true });
+    box(hu, hv, hw + 0.04, 0.95, hd + 0.04, H - 0.06, { color: mixHex(col, '#f3efe8', 0.3), pattern: 10 }); // parapet
+    box(hu, hv, hw + 0.1, 0.06, hd + 0.1, H + 0.88, copeM); // coping
+    box(hu - dir * 0.2, hv + dir * (hd / 2 + 0.6), Math.min(hw * 0.6, 4), 0.14, 1.2, 3.0, slabM); // first-floor balcony slab / porch roof
+    if (rnd() < 0.8) { const [x, z] = at(hu + hw * 0.3, hv - dir * hd * 0.25); E.part(g, Object.assign({ geo: E.geo('cyl', 0.55, 1.2, 1, 14), x, y: H + 0.85, z }, tank)); }
+    // windows on every face, storey by storey (a blank box reads as a placeholder, not a house)
+    const win = (cu, cv, alongU, y, out) => { const o = 0.035 * out; // out: +1/-1, the side the face looks to
+      if (alongU) { box(cu, cv + o, 1.3, 1.25, 0.05, y, frame); box(cu, cv + 2 * o, 1.12, 1.07, 0.05, y + 0.09, glass); }
+      else { box(cu + o, cv, 0.05, 1.25, 1.3, y, frame); box(cu + 2 * o, cv, 0.05, 1.07, 1.12, y + 0.09, glass); } };
+    for (let k = 0; k < st; k++) { const y = k * 3.1 + 0.95, nf = Math.max(1, Math.floor(hw / 2.8)), ns = Math.max(1, Math.floor(hd / 3.4));
+      for (let i = 0; i < nf; i++) { const cu = hu - hw / 2 + (i + 0.5) * hw / nf;
+        if (k === 0 && i === nf - 1) box(cu, hv + dir * (hd / 2 + 0.03), 1.05, 2.15, 0.06, -0.02, doorM); // front door
+        else win(cu, hv + dir * hd / 2, true, y, dir);
+        win(cu, hv - dir * hd / 2, true, y, -dir); }
+      for (let i = 0; i < ns; i++) { const cv = hv - hd / 2 + (i + 0.5) * hd / ns; win(hu - hw / 2, cv, false, y, -1); win(hu + hw / 2, cv, false, y, 1); } }
+    if (rnd() < 0.75) tree(g, ...at(um + (rnd() - 0.5) * (w - 3), vNear - dir * (set * 0.5)), 0.6 + rnd() * 0.5, Math.floor(rnd() * 9), 12);
+  };
+  // our side of the street: two plots on each side, sharing our boundary
+  const pw = () => 11 + rnd() * 5;
+  let a = u1 + 0.3; for (let i = 0; i < 2; i++) { const w = pw(); neighbour(a, a + w, vF, -sg); a += w + 0.3; }
+  a = u0 - 0.3; for (let i = 0; i < 2; i++) { const w = pw(); neighbour(a - w, a, vF, -sg); a -= w + 0.3; }
+  // across the road: a row of plots
+  const vFar = roadAt + sg * 4.95; a = uc - 30;
+  while (a < uc + 30) { const w = pw(); neighbour(a, a + w, vFar, sg); a += w + 0.3; }
+  // street trees along the far footpath
+  for (let t = uc - 32; t < uc + 34; t += 9 + rnd() * 3) tree(g, ...at(t, roadAt + sg * 4.4), 0.7 + rnd() * 0.5, Math.floor(rnd() * 9), 12);
+  let k = 0; MERGE.forEach((list, m) => { const { merge, ...mat } = m; E.part(g, Object.assign({ geo: E.mergedBoxes('street' + k++, list), x: 0, y: 0, z: 0, cast: false }, mat)); });
+}
 /* lush shrubs: a cluster of overlapping leaf balls */
 function bush(g, x, z, s, seed, y = 0) {
   const rnd = seeded('bush' + seed + x.toFixed(2) + z.toFixed(2));
   for (let i = 0; i < 6; i++) { const a = rnd() * 6.283, d = (i ? 0.35 + rnd() * 0.25 : 0) * s, r = (0.36 + rnd() * 0.18) * s;
-    E.part(g, { geo: E.geo('sph', r, 12), x: x + Math.cos(a) * d, y: y + r * 0.75 + rnd() * 0.12 * s, z: z + Math.sin(a) * d, sy: 0.9, color: ['#35602a', '#3f6d2e', '#2f5726'][i % 3], color2: '#78a24a', pattern: 16 }); }
+    E.part(g, { geo: E.geo('sph', r, 12), x: x + Math.cos(a) * d, y: y + r * 0.75 + rnd() * 0.12 * s, z: z + Math.sin(a) * d, sy: 0.9, color: ['#3a5228', '#435a2c', '#33492a'][i % 3], color2: '#6c7f45', pattern: 24 }); }
 }
 function buildGarage(r, f, yOff) { // car + motorbike inside, nose to the door, LED strip lights
   const gd = garageDoors(f).find(d => d.room === r.id) || f.doors.find(d => d.w >= 2.2 && Math.abs((d.o === 'h' ? d.y : d.x) - (d.o === 'h' ? (Math.abs(d.y - r.y) < 0.2 ? r.y : r.y + r.d) : (Math.abs(d.x - r.x) < 0.2 ? r.x : r.x + r.w))) < 0.2);
@@ -3565,13 +3671,13 @@ function applyEnv() {
   const az = sunAz(h) * Math.PI / 180 + (S.project?.north || 0) * Math.PI / 180;
   const ce = Math.cos(el); env.sunDir = V3.norm([ce * Math.sin(az), Math.max(0.03, Math.sin(el)), -ce * Math.cos(az)]);
   const k = clamp(Math.sin(el) * 1.6, 0, 1); const day = clamp((Math.sin(el) + 0.1) * 3, 0, 1);
-  const warm = [2.6, 1.45, 0.7], noon = [2.5, 2.38, 2.2];
+  const warm = [2.6, 1.45, 0.7], noon = [2.75, 2.58, 2.32];
   const zen = mixHex('#0a1022', mixHex('#4c5f92', '#3c7ccc', k), day), hor = mixHex('#1c2540', mixHex('#f0b088', '#d3e3ef', k), day);
   env.zenith = zen; env.horizon = hor; env.groundCol = mixHex('#141820', '#6d7652', day);
   env.night = 1 - day; env.clouds = 0.65; env.vignette = 0.22;
   if (day > 0) {
     env.sunCol = noon.map((v, i) => (warm[i] + (v - warm[i]) * k) * day);
-    env.amb = 0.55 + 0.45 * day; env.exposure = 0.82; env.shadows = day > 0.05;
+    env.amb = 0.5 + 0.3 * day; env.exposure = 0.74; env.shadows = day > 0.05;
   } else { // moonlight: a cool, dim key light from high in the opposite sky, so the house still reads at night
     env.sunDir = V3.norm([-0.35, 0.75, 0.45]); env.sunCol = [0.11, 0.15, 0.26];
     env.amb = 1.0; env.exposure = 1.25; env.shadows = true;
@@ -4853,6 +4959,7 @@ const ACT = {
   'toggle-labels': () => { S.labels = !S.labels; $('#t-lab').classList.toggle('on', S.labels); E.dirty = true; },
   'walk-outside': () => setView('walk', { outside: true }),
   'kbd-help': () => toast(S.view === 'walk' ? 'Walk: arrow keys (or W A S D) to move · drag to look around · hold Shift to walk faster' : 'Fly around: W A S D / arrows to glide · Q E to circle · Z X to zoom · T G to tilt · Shift = faster · drag to orbit', 6000),
+  'toggle-context': () => { S.context = S.context === false; $('#t-ctx')?.classList.toggle('on', S.context !== false); rebuild(); },
   'toggle-roof': () => { S.roof = !S.roof; if (S.roof && S.cutaway) { S.cutaway = false; $('#t-cut').classList.remove('on'); } $('#t-roof').classList.toggle('on', S.roof); rebuild(); },
   'toggle-sun': () => { S.daylightSim = !S.daylightSim; $('#t-sun').classList.toggle('on', S.daylightSim); rebuild(); if (S.daylightSim) toast('Sunlight now enters only through windows & doors — move the time slider'); },
   'play-day': () => { if (S.dayTimer) { clearInterval(S.dayTimer); S.dayTimer = null; return; } if (!S.daylightSim) { S.daylightSim = true; $('#t-sun').classList.add('on'); rebuild(); } let h = 6; S.dayTimer = setInterval(() => { h += 0.08; setHour(h); const lh = $('#lt-h'); if (lh) lh.textContent = fmtHour(h); if (h >= 19.2) { clearInterval(S.dayTimer); S.dayTimer = null; } }, 50); },
@@ -5111,7 +5218,7 @@ function boot() {
   if (store.get('g_redirect', 0)) { store.set('g_redirect', 0); initFirebase().then(fb => fb && fb.getRedirectResult()).then(r => { if (r && r.user) finishGoogleSignIn(r.user); }).catch(e => { AUTH.err = fbErr(e); show('login'); renderAuth(); }); }
   else if (currentUser()?.method === 'google') restoreGoogleSession();
   if (CLOUD.token && currentUser()?.method === 'cloud') API.req('/api/auth/me', { timeout: 10000 }).then(j => { const u = store.get('user', null); if (u && j.user) { u.name = j.user.name || u.name; if (j.user.prefs && j.user.prefs.answers) u.answers = j.user.prefs.answers; store.set('user', u); updateUserChips(); } setSyncChip('ok'); }).catch(() => { });
-  window.DIMORA = { ACT, CHANGE, CLOUD, isCloud, openWorkspace, S, E: () => E, CTL: () => CTL, rebuild, askAria, localParse, analyzeSpace, analyzeLight, homeCost, archChecks, sampleHome, startTour, stopTour, setView, TOUR, show, resetUpload, execActions, floorY, stairEnd, stairFoot, sampleDuplex, tourOrder, drawPlanImage, withProject, renderAuth, save, transformRoom, _fs: { fsPut, fsGet, fsDel, fsList }, edgePlan, applyEdge, resizeRoomTo, fitStairs, stairWallCross, overlapping, tidyRooms, wallLines, walkCollide, openRender, renderShot, RD, hipRects };
+  window.DIMORA = { ACT, CHANGE, CLOUD, isCloud, openWorkspace, S, E: () => E, CTL: () => CTL, rebuild, askAria, localParse, analyzeSpace, analyzeLight, homeCost, archChecks, sampleHome, startTour, stopTour, setView, TOUR, show, resetUpload, execActions, floorY, stairEnd, stairFoot, sampleDuplex, tourOrder, drawPlanImage, withProject, renderAuth, save, transformRoom, _fs: { fsPut, fsGet, fsDel, fsList }, edgePlan, applyEdge, resizeRoomTo, fitStairs, stairWallCross, overlapping, tidyRooms, wallLines, walkCollide, openRender, renderShot, RD, hipRects, furnishAll, applyEnv };
 }
 
 /* ===================== LOGIN PORTAL (Gmail) & INTRO QUESTIONS ===================== */
