@@ -43,6 +43,16 @@ class Settings:
     public = os.getenv("DIMORA_PUBLIC", "0").lower() in ("1", "true", "yes", "on")
     ai_per_hour = int(os.getenv("DIMORA_AI_PER_HOUR", "20"))    # per visitor IP, 0 = unlimited
     ai_per_day = int(os.getenv("DIMORA_AI_PER_DAY", "500"))     # whole site, 0 = unlimited
+    # AI photo renders: a Gemini image model ("Nano Banana") repaints a view of the 3D model as a photo.
+    # If a model name isn't found, the next one in the list is tried.
+    gemini_image_model = os.getenv("GEMINI_IMAGE_MODEL", "gemini-nano-banana-2.1")
+    gemini_image_model_hd = os.getenv("GEMINI_IMAGE_MODEL_HD", "gemini-3-pro-image")
+    gemini_image_fallbacks = [m.strip() for m in os.getenv("GEMINI_IMAGE_FALLBACKS", "gemini-3.1-flash-image,gemini-2.5-flash-image").split(",") if m.strip()]
+    render_timeout = float(os.getenv("DIMORA_RENDER_TIMEOUT", "150"))  # below gunicorn's 180 s worker timeout
+    # Renders cost more than text calls, so on a public site they get their own, smaller allowance
+    # (visitors who paste their own Gemini key are not limited). An HD render uses 3 of them.
+    render_per_hour = int(os.getenv("DIMORA_RENDER_PER_HOUR", "6"))   # per visitor IP, 0 = unlimited
+    render_per_day = int(os.getenv("DIMORA_RENDER_PER_DAY", "60"))    # whole site, 0 = unlimited
 
 
 settings = Settings()

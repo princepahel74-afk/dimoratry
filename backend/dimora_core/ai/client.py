@@ -111,6 +111,7 @@ class AIClient:
             "provider": self.provider,
             "ollama": {"url": self.ollama_url, "running": models is not None, "model": self.ollama_model, "model_installed": self.ollama_ready(), "models": models or []},
             "gemini": {"configured": bool(self.gemini_key), "model": self.gemini_model},
+            "render": {"available": bool(self.gemini_key), "model": settings.gemini_image_model, "hd_model": settings.gemini_image_model_hd},
             "openrouter": {"configured": bool(self.openrouter_key), "model": self.openrouter_model,
                            **({"remaining_this_hour": limiter.remaining(self.quota_key)} if self.quota_key else {})},
             "public": settings.public,
@@ -215,6 +216,83 @@ class AIClient:
         return self._openai_style("Gemini", settings.gemini_url.rstrip("/") + "/chat/completions",
                                   {"Authorization": f"Bearer {self.gemini_key}"}, body, hints, timeout,
                                   ["temperature", "reasoning_effort", "response_format"])
+
+    # ---------- images (AI photo renders) ----------
+    def image_models(self, hd: bool = False):
+        first = settings.gemini_image_model_hd if hd else settings.gemini_image_model
+        chain = [first] + ([settings.gemini_image_model] if hd else []) + list(settings.gemini_image_fallbacks)
+        return list(dict.fromkeys(m for m in chain if m))
+
+    def render_image(self, prompt: str, image_b64: str, mime: str = "image/jpeg", hd: bool = False,
+                     aspect: str = "4:3", timeout: float | None = None) -> dict:
+        """Repaint an image from a text instruction with a Gemini image model ("Nano Banana").
+
+        Uses Gemini's own generateContent endpoint (the OpenAI-compatible one only returns text).
+        Returns {"image": base64, "mime": str, "model": str, "note": str}."""
+        if not self.gemini_key:
+            raise AIUnavailable("AI photo renders use Google Gemini. Set GEMINI_API_KEY on the server, "
+                                "or add your own Gemini key in ⚙ Settings.")
+        base = settings.gemini_url.rstrip("/")
+        base = base[: -len("/openai")] if base.endswith("/openai") else base
+        tried = []
+        for model in self.image_models(hd):
+            gen = {"responseModalities": ["TEXT", "IMAGE"], "imageConfig": {"aspectRatio": aspect, "imageSize": "2K" if hd else "1K"}}
+            body = {"contents": [{"role": "user", "parts": [{"text": prompt}, {"inlineData": {"mimeType": mime, "data": image_b64}}]}],
+                    "generationConfig": gen}
+            r = None
+            for _ in range(3):  # older image models reject imageSize / imageConfig: drop them and retry
+                try:
+                    r = requests.post(f"{base}/models/{model}:generateContent", json=body,
+                                      headers={"x-goog-api-key": self.gemini_key}, timeout=timeout or settings.render_timeout)
+                except requests.RequestException as e:
+                    raise AIError(f"Gemini not reachable ({e.__class__.__name__})") from e
+                msg = self._google_error(r)
+                if r.status_code == 400 and "imageSize" in gen.get("imageConfig", {}) and re.search(r"image_?size", msg, re.I):
+                    gen["imageConfig"].pop("imageSize")
+                    continue
+                if r.status_code == 400 and "imageConfig" in gen and re.search(r"image_?config|aspect", msg, re.I):
+                    gen.pop("imageConfig")
+                    continue
+                break
+            if r.status_code == 404:
+                tried.append(model)
+                continue
+            if not r.ok:
+                msg = self._google_error(r)
+                hints = {401: "the Gemini API key was rejected — check GEMINI_API_KEY",
+                         403: "this Gemini key can't use image models — check it in Google AI Studio",
+                         429: "the Gemini image quota is used up — wait a minute, or enable billing in Google AI Studio "
+                              "(image models have little or no free allowance)"}
+                if r.status_code == 400 and re.search(r"billing|free.?tier|paid", msg, re.I):
+                    msg = "image models need billing enabled in Google AI Studio"
+                raise AIError(f"Gemini image HTTP {r.status_code}: {hints.get(r.status_code) or msg}")
+            j = r.json()
+            cand = (j.get("candidates") or [{}])[0] or {}
+            image, mime_out, notes = None, "image/png", []
+            for p in (cand.get("content") or {}).get("parts") or []:
+                blob = p.get("inlineData") or p.get("inline_data")
+                if blob and blob.get("data") and not p.get("thought"):
+                    image, mime_out = blob["data"], blob.get("mimeType") or blob.get("mime_type") or "image/png"
+                elif p.get("text") and not p.get("thought"):
+                    notes.append(p["text"].strip())
+            if not image:
+                why = (j.get("promptFeedback") or {}).get("blockReason") or cand.get("finishReason") or "no image in the reply"
+                extra = f" — {notes[0][:200]}" if notes else ""
+                raise AIError(f"Gemini didn't return an image ({why}){extra}. Try again, or change the notes.")
+            self.used = f"gemini:{model}"
+            return {"image": image, "mime": mime_out, "model": model, "note": " ".join(notes)[:400]}
+        raise AIError("Gemini image model not found (tried " + ", ".join(tried) + ") — set GEMINI_IMAGE_MODEL to a current model")
+
+    @staticmethod
+    def _google_error(r) -> str:
+        if r.ok:
+            return ""
+        try:
+            j = r.json()
+            err = j[0].get("error", {}) if isinstance(j, list) else j.get("error", {})
+            return (err.get("message") if isinstance(err, dict) else str(err)) or r.text[:200]
+        except ValueError:
+            return r.text[:200]
 
     def _openrouter(self, messages, temperature, max_tokens, want_json, timeout):
         body = {"model": self.openrouter_model, "temperature": temperature, "max_tokens": max_tokens,

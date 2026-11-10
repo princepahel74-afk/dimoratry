@@ -89,6 +89,14 @@ vec3 skyCol(vec3 d, bool detail){
   return c;
 }
 vec3 aces(vec3 x){ return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
+// photographic grade after tone mapping: real cameras see less saturated colour than a game engine shows
+vec3 grade(vec3 c){
+  float l = dot(c, vec3(0.2126,0.7152,0.0722));
+  c = mix(vec3(l), c, 0.82);                        // calmer greens, woods and fabrics
+  c *= vec3(1.015, 1.0, 0.975);                     // warm-neutral white balance (daylight on plaster)
+  c = c*c*(3.0-2.0*c)*0.18 + c*0.82;               // gentle S-curve: deeper shadows, softer highlights
+  return clamp(c, 0.0, 1.0);
+}
 `;
 const VS_MAIN = `#version 300 es
 in vec3 aPos; in vec3 aNor;
@@ -145,8 +153,8 @@ void main(){
   bool glass = false;
   if(uPattern==1){ // wood planks
     float row=floor(uv.y); float along=uv.x+h21(vec2(row,7.0))*6.0; float seg=floor(along/6.0);
-    float t=h21(vec2(row,seg)); base*=0.91+0.15*t; base=mix(base, c2, 0.12*h21(vec2(seg,row*3.1)));
-    float grain=fbm(vec2(along*0.6, uv.y*14.0)+t*10.0); base*=0.9+0.17*grain;
+    float t=h21(vec2(row,seg)); base*=0.94+0.09*t; base=mix(base, c2, 0.08*h21(vec2(seg,row*3.1)));
+    float grain=fbm(vec2(along*0.6, uv.y*14.0)+t*10.0); base*=0.93+0.12*grain;
     float fy=fract(uv.y), fx=fract(along/6.0);
     float gap = (fy<0.03||fy>0.988||fx<0.004) ? 1.0 : 0.0; base*=1.0-0.28*gap;
     h = -gap*0.0015*uPatScale + grain*0.00025; rough = 0.42 + 0.2*grain;
@@ -161,8 +169,10 @@ void main(){
     vec2 g=fract(uv*0.5); float e=min(min(g.x,1.0-g.x),min(g.y,1.0-g.y)); float j = e<0.004 ? 1.0 : 0.0; base*=1.0-0.1*j;
     h = -j*0.001; rough = 0.14;
   } else if(uPattern==4){ // carpet / fabric
-    float f1=h21(floor(vW.xz*160.0)+floor(vW.y*160.0)); base*=0.9+0.2*f1; float f2=fbm((flat_?vW.xz:vec2(vW.x+vW.z,vW.y))*6.0); base*=0.93+0.1*f2;
-    h = f2*0.0012; rough = 0.95;
+    vec2 fq = flat_ ? vW.xz : vec2(vW.x+vW.z, vW.y);
+    float weave = 0.5 + 0.25*(sin(fq.x*900.0) + sin(fq.y*900.0)); float f2 = fbm(fq*5.0);
+    base *= mix(1.0, 0.95 + 0.1*weave, af*0.6); base *= 0.95 + 0.08*f2;
+    h = f2*0.0012 + weave*0.0002*af; rough = 0.95;
   } else if(uPattern==5){ // herringbone
     vec2 cell=floor(uv); vec2 f=fract(uv); float k=mod(cell.x+cell.y,2.0);
     float l = k<0.5? f.x: f.y; float stripe=floor(l*3.0);
@@ -187,11 +197,11 @@ void main(){
   } else if(uPattern==10){ // exterior plaster / textured render
     float n1 = fbm(uv*3.0), n2 = vnoise(uv*90.0), n3 = fbm(uv*0.35);
     base *= 0.93 + 0.07*n1 + 0.04*n2; base *= 0.95 + 0.08*n3;
-    // grime: slightly darker near the base of the wall
+    base *= 0.9 + 0.1*smoothstep(0.02, 0.9, vW.y);   // weathering: slightly darker near the ground
     h = n2*0.0007 + n1*0.0006; rough = 0.93; bk = 1.3;
   } else if(uPattern==11){ // lawn grass
     vec2 p = vW.xz; float n1 = fbm(p*0.35), n2 = mix(0.5, fbm(p*2.2), wa), bl = mix(0.5, h21(floor(p*55.0)), wa*wa);
-    base = mix(base, c2, smoothstep(0.35,0.7,n1)); base *= 0.8 + 0.22*n2 + 0.14*bl;
+    base = mix(base, c2, smoothstep(0.3,0.75,n1)*0.55); base *= 0.86 + 0.16*n2 + 0.1*bl;
     base = mix(base, base*vec3(1.08,1.04,0.82), smoothstep(0.62,0.8,n1)*0.4);
     h = bl*0.004 + n2*0.002; rough = 0.95; bk = 1.0;
   } else if(uPattern==12){ // paving stones (running bond)
@@ -213,9 +223,12 @@ void main(){
     vec2 g=fract(uv); float e=min(min(g.x,1.0-g.x),min(g.y,1.0-g.y)); float j = 1.0-smoothstep(0.015,0.03,e);
     base *= 0.88+0.16*h21(floor(uv)); base *= 0.9+0.15*fbm(uv*4.0); base = mix(base, c2, j); h = -j*0.003; rough = 0.85;
   } else if(uPattern==15){ glass = true; rough = 0.04;
-  } else if(uPattern==16){ // foliage (leaf clumps)
+  } else if(uPattern==16 || uPattern==24){ // foliage (leaf clumps); 24 = tree/shrub clumps with ragged leafy edges
+    if(uPattern==24){ float rim = 1.0 - abs(dot(normalize(vN), normalize(uCam - vW)));
+      float lf = 0.6*vnoise(vW.xz*22.0 + vW.y*17.0) + 0.4*vnoise(vec2(vW.x+vW.z, vW.y)*41.0);
+      if(lf < rim*1.3 - 0.42) discard; }
     vec3 q = vW*4.0; float n = fbm(q.xz+q.y*1.7); float n2 = fbm(vec2(vW.x+vW.y*0.7, vW.z-vW.y*0.6)*7.0);
-    base = mix(base, c2, smoothstep(0.3,0.8,n)); base *= 0.72+0.4*n2; h = n2*0.02; rough = 0.8; bk = 0.6;
+    base = mix(base, c2, smoothstep(0.3,0.8,n)*0.7); base *= (0.66+0.38*n2)*(0.72+0.28*smoothstep(-0.6,0.7,N.y)); h = n2*0.02; rough = 0.8; bk = 0.6;
   } else if(uPattern==18){ // cobblestone setts (driveways)
     vec2 b = uv/0.13; b.x += mod(floor(b.y),2.0)*0.5; vec2 f = fract(b), id = floor(b);
     vec2 q = abs(f-0.5); float edge = smoothstep(0.37,0.47,max(q.x,q.y))*af;
@@ -255,6 +268,9 @@ void main(){
     base = mix(base, c2, m*0.8); base *= 0.97+0.04*fbm(uv*6.0); rough = 0.8;
   } else if(uPattern==17){ // water
     float n = fbm(vW.xz*3.0); h = n*0.004; rough = 0.05;
+  } else if(uPattern==0 && uMetal < 0.5){ // paint, plaster, laminate: faint unevenness, never a flat CG colour
+    vec3 q = vW*1.3; float n = fbm(q.xz + q.y*1.7 + vec2(q.y*0.9, 0.0));
+    base *= 0.975 + 0.045*n; rough = 0.78 + 0.1*n;
   }
   if(uRough >= 0.0) rough = uRough;
   if(uBump > 0.0 && h != 0.0) N = bumpN(N, h*af, uBump*bk);
@@ -301,7 +317,7 @@ void main(){
   col += vec3(uHL)*vec3(1.0,0.75,0.35)*0.35;
   float dist=length(vW-uCam); float fog=1.0-exp(-pow(dist*uFog,2.0));
   col = mix(col, skyCol(-V, false), clamp(fog,0.0,1.0));
-  col = aces(col*uExposure);
+  col = grade(aces(col*uExposure));
   outColor = vec4(pow(col, vec3(1.0/2.2)), alpha);
 }`;
 const VS_DEPTH = `#version 300 es
@@ -315,7 +331,7 @@ precision highp float; in vec2 vUV; uniform mat4 uInvVP; uniform float uExposure
 ${SKY_GLSL}
 out vec4 o;
 void main(){ vec2 p = vUV*2.0-1.0; vec4 a = uInvVP*vec4(p,-1.0,1.0), b = uInvVP*vec4(p,1.0,1.0);
-  vec3 d = normalize(b.xyz/b.w - a.xyz/a.w); vec3 c = aces(skyCol(d, true)*uExposure); o = vec4(pow(c, vec3(1.0/2.2)), 1.0); }`;
+  vec3 d = normalize(b.xyz/b.w - a.xyz/a.w); vec3 c = grade(aces(skyCol(d, true)*uExposure)); o = vec4(pow(c, vec3(1.0/2.2)), 1.0); }`;
 // Screen-space ambient occlusion from the depth buffer (half resolution)
 const FS_SSAO = `#version 300 es
 precision highp float; in vec2 vUV; uniform sampler2D uDepth; uniform mat4 uProj, uInvProj; uniform vec2 uTexel; uniform float uRadius;
@@ -328,7 +344,8 @@ void main(){
   vec3 pr = vpos(vUV+vec2(uTexel.x,0.0)), pl = vpos(vUV-vec2(uTexel.x,0.0)), pu = vpos(vUV+vec2(0.0,uTexel.y)), pd = vpos(vUV-vec2(0.0,uTexel.y));
   vec3 dx = abs(pr.z-P.z) < abs(P.z-pl.z) ? pr-P : P-pl; vec3 dy = abs(pu.z-P.z) < abs(P.z-pd.z) ? pu-P : P-pd;
   vec3 N = normalize(cross(dx, dy)); if(dot(N, -P) < 0.0) N = -N;
-  float an = fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))*6.2832; // interleaved gradient noise: averages out cleanly in the blur vec3 rv = vec3(cos(an), sin(an), 0.0);
+  float an = fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))))*6.2832; // interleaved gradient noise: averages out cleanly in the blur
+  vec3 rv = vec3(cos(an), sin(an), 0.0);
   vec3 T = normalize(rv - N*dot(rv,N)); vec3 B = cross(N,T);
   float rad = uRadius; float occ = 0.0;
   for(int i=0;i<14;i++){
@@ -343,7 +360,7 @@ void main(){
   o = vec4(pow(clamp(ao,0.0,1.0), 1.25), 0.0, 0.0, 1.0);
 }`;
 const FS_COMPOSITE = `#version 300 es
-precision highp float; in vec2 vUV; uniform sampler2D uColor, uAO, uDepth; uniform vec2 uAOTexel; uniform int uUseAO; uniform float uAOStrength, uVignette;
+precision highp float; in vec2 vUV; uniform sampler2D uColor, uAO, uDepth; uniform vec2 uAOTexel, uPix; uniform int uUseAO; uniform float uAOStrength, uVignette, uEdge;
 uniform mat4 uInvProj; out vec4 o;
 float vz(vec2 uv){ float z = texture(uDepth, uv).r*2.0-1.0; vec4 p = uInvProj*vec4(uv*2.0-1.0, z, 1.0); return p.z/p.w; }
 void main(){
@@ -355,6 +372,14 @@ void main(){
       float ao = w > 1e-3 ? s/w : texture(uAO, vUV).r;
       c *= mix(1.0, ao, uAOStrength);
     }
+  }
+  if(uEdge > 0.0 && texture(uDepth, vUV).r < 0.9996){
+    // 1/z is linear across any flat surface, so its second difference is ~0 on walls and floors and
+    // spikes only at corners, edges and outlines: a fine, soft line like an architect's model
+    float w0 = 1.0/vz(vUV), wl = 1.0/vz(vUV-vec2(uPix.x,0.0)), wr = 1.0/vz(vUV+vec2(uPix.x,0.0)), wd = 1.0/vz(vUV-vec2(0.0,uPix.y)), wu = 1.0/vz(vUV+vec2(0.0,uPix.y));
+    float lap = (abs(wl+wr-2.0*w0) + abs(wd+wu-2.0*w0))/abs(w0);
+    float z = abs(1.0/w0); float e = smoothstep(0.004, 0.03, lap)*(1.0 - smoothstep(18.0, 55.0, z));
+    c *= 1.0 - uEdge*e;
   }
   vec2 q = vUV-0.5; c *= 1.0 - uVignette*dot(q,q)*1.6;
   o = vec4(c, 1.0);
@@ -389,9 +414,9 @@ class Engine {
     this.uSky = this._uniforms(this.progSky, ['uInvVP', ...skyU]);
     try {
       this.progSSAO = this._prog(VS_FULL, FS_SSAO); this.uSSAO = this._uniforms(this.progSSAO, ['uDepth', 'uProj', 'uInvProj', 'uTexel', 'uRadius', 'uKernel[0]']);
-      this.progComp = this._prog(VS_FULL, FS_COMPOSITE); this.uComp = this._uniforms(this.progComp, ['uColor', 'uAO', 'uDepth', 'uAOTexel', 'uUseAO', 'uAOStrength', 'uVignette', 'uInvProj']);
+      this.progComp = this._prog(VS_FULL, FS_COMPOSITE); this.uComp = this._uniforms(this.progComp, ['uColor', 'uAO', 'uDepth', 'uAOTexel', 'uUseAO', 'uAOStrength', 'uVignette', 'uInvProj', 'uPix', 'uEdge']);
       this.postOK = true;
-    } catch (e) { this.postOK = false; }
+    } catch (e) { this.postOK = false; console.warn('DIMORA: post-processing (SSAO) is off:', e.message || e); }
     this.kernel = new Float32Array(42);
     for (let i = 0; i < 14; i++) { // hemisphere samples, denser near the centre
       const u = (i + 0.5) / 14, a = i * 2.39996, r = Math.sqrt(1 - u * u * 0.85);
@@ -494,7 +519,21 @@ class Engine {
     gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
     gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
     gl.bindVertexArray(null);
-    return { vao, count: pos.length / 3 };
+    return { vao, count: pos.length / 3, buf: b };
+  }
+  // many axis-aligned boxes ({x, y (base), z, w, h, d}) merged into one mesh = one draw call.
+  // Kept per slot and freed when the slot is rebuilt with different boxes.
+  mergedBoxes(slot, list) {
+    const key = list.map(b => [b.x, b.y, b.z, b.w, b.h, b.d].map(v => v.toFixed(2)).join(',')).join(';');
+    this._slots = this._slots || new Map(); const old = this._slots.get(slot);
+    if (old && old.key === key) return old.geo;
+    if (old) { this.gl.deleteVertexArray(old.geo.vao); this.gl.deleteBuffer(old.geo.buf); }
+    const P = [], N = [], f = (v, n) => [0, 1, 2, 0, 2, 3].forEach(i => { P.push(...v[i]); N.push(...n); });
+    list.forEach(b => { const x0 = b.x - b.w / 2, x1 = b.x + b.w / 2, y0 = b.y, y1 = b.y + b.h, z0 = b.z - b.d / 2, z1 = b.z + b.d / 2;
+      f([[x0, y0, z1], [x1, y0, z1], [x1, y1, z1], [x0, y1, z1]], [0, 0, 1]); f([[x1, y0, z0], [x0, y0, z0], [x0, y1, z0], [x1, y1, z0]], [0, 0, -1]);
+      f([[x1, y0, z1], [x1, y0, z0], [x1, y1, z0], [x1, y1, z1]], [1, 0, 0]); f([[x0, y0, z0], [x0, y0, z1], [x0, y1, z1], [x0, y1, z0]], [-1, 0, 0]);
+      f([[x0, y1, z1], [x1, y1, z1], [x1, y1, z0], [x0, y1, z0]], [0, 1, 0]); f([[x0, y0, z0], [x1, y0, z0], [x1, y0, z1], [x0, y0, z1]], [0, -1, 0]); });
+    const geo = this._upload(P, N); this._slots.set(slot, { key, geo }); return geo;
   }
   geo(kind, a = 1, b = 1, c = 1, seg = 18) {
     const key = kind + ':' + [a, b, c, seg].map(v => (+v).toFixed(3)).join(':');
@@ -504,6 +543,7 @@ class Engine {
     else if (kind === 'rbox') g = this._rbox(a, b, c, seg);
     else if (kind === 'cyl') g = this._cyl(a, b, seg, c);
     else if (kind === 'sph') g = this._sph(a, seg);
+    else if (kind === 'hip') g = this._hip(a, b, c);
     this.geoCache.set(key, g); return g;
   }
   // box: width a (x), height b (y, from 0), depth c (z), centered on x/z
@@ -516,6 +556,21 @@ class Engine {
     f([[-x, 0, -z], [-x, 0, z], [-x, h, z], [-x, h, -z]], [-1, 0, 0]);
     f([[-x, h, z], [x, h, z], [x, h, -z], [-x, h, -z]], [0, 1, 0]);
     f([[-x, 0, -z], [x, 0, -z], [x, 0, z], [-x, 0, z]], [0, -1, 0]);
+    return this._upload(P, N);
+  }
+  // hip roof over a w × d rectangle (centred on x/z, base at y 0), ridge height h along the longer side
+  _hip(w, h, d) {
+    const a = w / 2, b = d / 2, P = [], N = [], r = w >= d ? [a - b, 0] : [0, b - a];
+    const R1 = w >= d ? [-r[0], h, 0] : [0, h, -r[1]], R2 = w >= d ? [r[0], h, 0] : [0, h, r[1]];
+    const c00 = [-a, 0, -b], c10 = [a, 0, -b], c11 = [a, 0, b], c01 = [-a, 0, b], ref = [0, h / 3, 0];
+    const tri = (A, B, C) => { // wind each face so it points away from the inside of the roof
+      let n = V3.cross(V3.sub(B, A), V3.sub(C, A)); const L = V3.len(n); if (L < 1e-9) return; n = V3.scale(n, 1 / L);
+      const m = [(A[0] + B[0] + C[0]) / 3 - ref[0], (A[1] + B[1] + C[1]) / 3 - ref[1], (A[2] + B[2] + C[2]) / 3 - ref[2]];
+      if (n[0] * m[0] + n[1] * m[1] + n[2] * m[2] < 0) { [B, C] = [C, B]; n = V3.scale(n, -1); }
+      P.push(...A, ...B, ...C); N.push(...n, ...n, ...n);
+    };
+    if (w >= d) { tri(c01, c11, R2); tri(c01, R2, R1); tri(c10, c00, R1); tri(c10, R1, R2); tri(c11, c10, R2); tri(c00, c01, R1); }
+    else { tri(c11, c10, R1); tri(c11, R1, R2); tri(c00, c01, R2); tri(c00, R2, R1); tri(c01, c11, R2); tri(c10, c00, R1); }
     return this._upload(P, N);
   }
   // rounded box: like box, but every edge and corner is rounded with radius r (smooth normals) — furniture,
@@ -648,7 +703,7 @@ class Engine {
     gl.uniformMatrix4fv(U.uLVP, false, lvp);
     gl.uniform3fv(U.uSunCol, shadowsOn || sd[1] > 0 ? env.sunCol : [0, 0, 0]);
     gl.uniform1f(U.uFog, env.fog);
-    gl.uniform3fv(U.uCam, this.cam.pos); gl.uniform1f(U.uAmb, env.amb);
+    gl.uniform3fv(U.uCam, this.cam.pos); gl.uniform1f(U.uAmb, env.amb * (1 - 0.2 * (env.warm || 0))); // indoors the fill light is dimmer than outdoors
     gl.uniform1i(U.uShadowOn, shadowsOn ? 1 : 0); gl.uniform1f(U.uShadowTexel, 1 / this.shadowSize);
     gl.uniform1f(U.uBump, this.Q.bump); gl.uniform1f(U.uWarm, env.warm || 0);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.shadowTex); gl.uniform1i(U.uShadow, 0);
@@ -698,7 +753,7 @@ class Engine {
       gl.useProgram(this.progSSAO); const S = this.uSSAO;
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, P.depth); gl.uniform1i(S.uDepth, 0);
       gl.uniformMatrix4fv(S.uProj, false, proj); gl.uniformMatrix4fv(S.uInvProj, false, inv);
-      gl.uniform2f(S.uTexel, 1 / P.aw, 1 / P.ah); gl.uniform1f(S.uRadius, this.aoRadius || 0.32); gl.uniform3fv(S.uKernel, this.kernel);
+      gl.uniform2f(S.uTexel, 1 / P.aw, 1 / P.ah); gl.uniform1f(S.uRadius, this.aoRadius || 0.26); gl.uniform3fv(S.uKernel, this.kernel);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, W, H);
@@ -707,7 +762,8 @@ class Engine {
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, P.ao || P.color); gl.uniform1i(C.uAO, 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, P.depth); gl.uniform1i(C.uDepth, 2);
     gl.uniform2f(C.uAOTexel, 1 / (P.aw || W), 1 / (P.ah || H)); gl.uniform1i(C.uUseAO, P.ao ? 1 : 0);
-    gl.uniform1f(C.uAOStrength, 0.6); gl.uniform1f(C.uVignette, this.env.vignette ?? 0.22); gl.uniformMatrix4fv(C.uInvProj, false, inv);
+    gl.uniform1f(C.uAOStrength, 0.65); gl.uniform1f(C.uVignette, this.env.vignette ?? 0.22); gl.uniformMatrix4fv(C.uInvProj, false, inv);
+    gl.uniform2f(C.uPix, 1 / W, 1 / H); gl.uniform1f(C.uEdge, this.edges ?? 0.22);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.activeTexture(gl.TEXTURE0);
     gl.enable(gl.DEPTH_TEST); gl.depthMask(true); gl.bindVertexArray(null);
@@ -739,6 +795,15 @@ class Engine {
       tmin = Math.max(tmin, t1); tmax = Math.min(tmax, t2); if (tmin > tmax) return null;
     }
     return tmax < 0 ? null : Math.max(tmin, 0);
+  }
+  // one frame at an exact size (e.g. 1440 × 1080 for an AI photo render), whatever the screen size
+  capture(w, h, type = 'image/jpeg', q = 0.92) {
+    const cv = this.canvas, sw = cv.width, sh = cv.height, fixed = this.fixed;
+    const max = Math.min(this.gl.getParameter(this.gl.MAX_RENDERBUFFER_SIZE) || 4096, this.gl.getParameter(this.gl.MAX_VIEWPORT_DIMS)?.[0] || 4096);
+    const k = Math.min(1, max / Math.max(w, h)); w = Math.round(w * k); h = Math.round(h * k);
+    this.fixed = true; cv.width = w; cv.height = h; this.dirty = true;
+    try { this.render(); return cv.toDataURL(type, q); }
+    finally { cv.width = sw; cv.height = sh; this.fixed = fixed; this.dirty = true; }
   }
   snapshot(w = 480, h = 300) {
     this.render();
@@ -2571,12 +2636,14 @@ function parseClause(c, room) {
   const intoPart = c.split(/\b(?:into|as an?|to become)\b/).slice(1).join(' ');
   const tr = (intoPart && findWord(intoPart, TRANSFORM_WORDS)) || findWord(stripRoom(c, room), TRANSFORM_WORDS);
   if (tr && /(convert|turn|transform|repurpose|change|make|into|become|use .* as)/.test(c) && !/(color|paint|floor|light)/.test(c)) return { do: 'transform', room, to: tr.v };
+  if (/(villa|facade|façade|exterior|elevation|outside|roof)/.test(c) && /(mediterranean|spanish|terracotta|tiled roof|clay roof)/.test(c) && !/(paint|colou?r)/.test(c)) return { do: 'facade', style: 'mediterranean' };
   if (/(villa|facade|façade|exterior|elevation|outside)/.test(c) && /(modern|contemporary|villa|stone|classic|traditional|indian|brick|planner)/.test(c) && !/(paint|colou?r)/.test(c)) return { do: 'facade', style: /brick/.test(c) ? 'brick' : /(classic|traditional|indian)/.test(c) ? 'classic' : 'modern' };
   const th = findWord(c, THEME_WORDS);
   if (th && /(style|theme|look|design|vibe|feel|make|apply|go|switch|change|redesign|turn|interior|decor)/.test(c)) return { do: 'theme', name: th.v, room: room && !/(whole|entire|house|home|everything|all)/.test(c) ? room : 'all' };
   if (/(false ceiling|cove|tray ceiling|peripheral ceiling|ceiling)/.test(c)) { const tp = /cove/.test(c) ? 'cove' : /tray/.test(c) ? 'tray' : /peripheral/.test(c) ? 'peripheral' : /(plain|flat|remove|no )/.test(c) ? 'flat' : 'cove'; return { do: 'ceiling', room: room || 'all', type: tp }; }
   const col = findColor(c);
   if (col && /(exterior|outside|outer wall|facade|façade|elevation|outside of the house)/.test(c)) return { do: 'exterior', color: col.hex, name: col.name };
+  if (/(ai render|photo ?render|photorealistic|realistic (photo|picture|image|render)|render (it|my home|my house|the house|the home|a photo))/.test(c)) return { do: 'render' };
   if (/\broof\b/.test(c) && /(show|see|view|add|put|on)/.test(c)) return { do: 'roof', on: !/(hide|remove|off|without)/.test(c) };
   if (col && /(paint|color|wall|make|change|turn|want|shade|tone|repaint|give)/.test(c) && !/\bfloor/.test(c) && !findWord(c, FURN_WORDS.filter(f => !['shelf', 'storage'].includes(f[0])))) return { do: 'wall_color', room: room || 'all', color: col.hex, name: col.name };
   const fl = findWord(c, FLOOR_WORDS);
@@ -2610,7 +2677,7 @@ function parseClause(c, room) {
 function execActions(actions, focus) {
   const done = [], fail = []; let needBuild = false, structural = false;
   if (!actions.length) return { done, fail };
-  const mutating = actions.some(a => !['tour', 'goto', 'view', 'open', 'time', 'suggest_paint', 'undo', 'show_floor', 'roof', 'cutaway', 'save_variant'].includes(a.do));
+  const mutating = actions.some(a => !['render', 'tour', 'goto', 'view', 'open', 'time', 'suggest_paint', 'undo', 'show_floor', 'roof', 'cutaway', 'save_variant'].includes(a.do));
   if (mutating) commit('AI: ' + actions.map(a => a.do).join(', '));
   const roomsOf = a => a.room === 'all' ? allRooms() : resolveRoom(a.room, focus);
   actions.forEach(a => {
@@ -2639,9 +2706,10 @@ function execActions(actions, focus) {
           const lv = parseLevel(q); const f = pj.floors.find(x => x.name.toLowerCase() === q) || pj.floors.find(x => q && x.name.toLowerCase().includes(q.replace(/ floor$/, ''))) || (lv != null ? pj.floors.find(x => x.level === lv) : null) || (/up/.test(q) ? floorAbove(FL()) : /down/.test(q) ? floorBelow(FL()) : null);
           if (!f) { fail.push('floor "' + a.floor + '"'); break; } pj.activeFloor = pj.floors.indexOf(f); S.showAllFloors = false; S.sel = null; rebuild(); renderFloorSeg(); if (S.view !== '2d') fitView(true); done.push(`Showing the ${f.name}.`); break; }
         case 'open': openPanel(a.panel); done.push(`Opened ${({ space: 'Space Analyzer', budget: 'Budget Estimator', light: 'Light & Ventilation', arch: 'Architectural checks', report: 'Home Decision Report', compare: 'Design Comparison', design: 'Interior Designer' })[a.panel] || a.panel}.`); break;
-        case 'facade': { const k = String(a.style || '').toLowerCase(), key = FACADES[k] ? k : /brick/.test(k) ? 'brick' : /(classic|indian|traditional)/.test(k) ? 'classic' : 'modern'; P().facade = key; P().exterior = null; done.push(`Exterior changed to ${FACADES[key].label} — ${FACADES[key].desc.toLowerCase()}.`); needBuild = true; break; }
+        case 'facade': { const k = String(a.style || '').toLowerCase(), key = FACADES[k] ? k : /(mediterranean|spanish|terracotta)/.test(k) ? 'mediterranean' : /brick/.test(k) ? 'brick' : /(classic|indian|traditional)/.test(k) ? 'classic' : 'modern'; P().facade = key; P().exterior = null; done.push(`Exterior changed to ${FACADES[key].label} — ${FACADES[key].desc.toLowerCase()}.`); needBuild = true; break; }
         case 'exterior': { const hex = /^#/.test(a.color) ? a.color : (NAMED_COLORS[String(a.color).toLowerCase()] || findColor(String(a.color).toLowerCase())?.hex); if (!hex) { fail.push('exterior colour'); break; } P().exterior = hex; done.push(`Painted the outside of the house ${a.name || hex}.`); needBuild = true; break; }
         case 'roof': { S.roof = a.on !== false; if (S.roof) S.cutaway = false; $('#t-roof')?.classList.toggle('on', S.roof); $('#t-cut')?.classList.toggle('on', S.cutaway); rebuild(); done.push(S.roof ? 'Showing the finished roof terrace.' : 'Roof hidden so you can see inside.'); break; }
+        case 'render': setTimeout(() => openRender(), 300); done.push('Opening the AI photo render — pick a style and press Render.'); break;
         case 'cutaway': { S.cutaway = a.on !== false; if (S.cutaway) S.roof = false; $('#t-cut')?.classList.toggle('on', S.cutaway); $('#t-roof')?.classList.toggle('on', S.roof); rebuild(); done.push(S.cutaway ? 'Cut the walls down so you can see every room.' : 'Walls back to full height.'); break; }
         case 'save_variant': { setTimeout(() => { const i = $('#var-name'); if (i) i.value = a.name || ''; ACT['save-variant'](); }, 50); done.push(`Saved this design as a variant${a.name ? ' “' + a.name + '”' : ''} — compare it in the Compare panel.`); break; }
         case 'suggest_paint': { const r = rooms[0] || allRooms()[0]; S.paintChips = { room: r.id, list: paintSuggestions(r) }; done.push(`Here are paint ideas for ${r.name} — tap one to apply:`); break; }
@@ -2686,8 +2754,9 @@ const ACTION_DOC = `Actions you can return (use exact keys; "room" is a room id 
 {"do":"open","panel":"design|space|budget|light|transform|arch|compare|report"}
 {"do":"suggest_paint","room":".."}
 {"do":"exterior","color":"#hex","name":"colour name"} (outside walls of the house)
-{"do":"facade","style":"modern|classic|brick"} (exterior style: modern villa = white + stacked stone + timber + dark roof overhang; classic Indian = plaster, plinth, chajjas, parapet; brick & white)
+{"do":"facade","style":"modern|classic|brick|mediterranean"} (exterior style: modern villa = white + stacked stone + timber + dark roof overhang; classic Indian = plaster, plinth, chajjas, parapet; brick & white; mediterranean = cream stucco, terracotta tiled hip roof, timber railings)
 {"do":"roof","on":true|false} {"do":"cutaway","on":true|false}
+{"do":"render"} (open the AI photo render: turns the 3D home into a photorealistic picture)
 {"do":"save_variant","name":".."} (snapshot the current design for comparison)`;
 const chatHistory = []; // kept for compatibility; the real memory lives in the project (S.project.chat)
 function chatMemory() { const pj = P(); if (!pj) return chatHistory; if (!Array.isArray(pj.chat)) pj.chat = []; return pj.chat; }
@@ -2912,6 +2981,7 @@ function rebuild(opts = {}) {
 /* ---------- the plot around the house: lawn, paving, path, boundary wall, garden ---------- */
 /* exterior styles: what the outside of the house is made of */
 const FACADES = {
+  mediterranean: { label: 'Mediterranean', desc: 'Cream stucco, terracotta tiled hip roofs, dark timber railings and window frames', wall: '#eadcc2', accent: null, band: 'cornice', plinth: true, chajja: false, frame: '#5a3a24', frameWood: true, rail: 'timber', roof: 'hip', drive: 'pavers', sw: ['#eadcc2', '#b4532f', '#5a3a24', '#c9b48f'] },
   modern: { label: 'Modern villa', desc: 'White render, stacked-stone feature walls, timber battens, dark roof overhangs', wall: '#efeeea', stone: ['#c9bba6', '#7f7466'], accent: 'stone', band: 'timber', plinth: false, chajja: false, frame: '#1c1e21', roof: 'overhang', drive: 'cobble', sw: ['#efeeea', '#d8d1c5', '#6b4429', '#2b2c2f'] },
   classic: { label: 'Classic Indian', desc: 'Warm plaster, stone plinth, moulded bands and window sunshades (chajjas)', wall: '#dacbb2', accent: null, band: 'cornice', plinth: true, chajja: true, frame: '#34383c', roof: 'parapet', drive: 'pavers', sw: ['#dacbb2', '#7d7166', '#e7dccb', '#34383c'] },
   brick: { label: 'Brick & white', desc: 'Exposed red-brick volumes, white render, slim black frames', wall: '#f1eee8', brick: ['#a5573c', '#d9d1c6'], accent: 'brick', band: 'cornice', plinth: true, chajja: false, frame: '#232426', roof: 'overhang', drive: 'cobble', sw: ['#f1eee8', '#a5573c', '#d9d1c6', '#232426'] },
@@ -2959,14 +3029,20 @@ function siteRect(b) {
   const m = { N: SITE.M, S: SITE.M, E: SITE.M, W: SITE.M }; m[side] = SITE.front;
   return { x0: b.x - m.W, x1: b.x + b.w + m.E, z0: b.y - m.N, z1: b.y + b.d + m.S, side, door: md && md.side ? md.d : null };
 }
-function tree(g, x, z, k, i) {
-  const h = 2.0 + 0.6 * k; E.part(g, { geo: E.geo('cyl', 0.13 + 0.04 * k, h, 0.55, 10), x, y: 0, z, color: '#5a4434', rough: 0.95 });
-  // an irregular canopy of many small clumps reads as a real tree; a few big balls read as a toy one
-  const tint = ['#3e5a2b', '#465f30', '#4f6534'][i % 3], rnd = n => { const v = Math.sin((i + 1) * 12.9898 + n * 78.233) * 43758.5453; return v - Math.floor(v); };
-  for (let n = 0; n < 16; n++) { const a = n * 2.39996, rr = 0.25 + 0.75 * Math.sqrt(rnd(n)), up = rnd(n + 40);
-    const r = (0.36 + 0.24 * rnd(n + 80)) * (0.9 + 0.35 * k), sx = Math.cos(a) * rr * (1 + 0.3 * k), sz = Math.sin(a) * rr * (1 + 0.3 * k);
-    E.part(g, { geo: E.geo('sph', r, 12), x: x + sx, y: h + 0.05 + up * 1.15 * (1 - rr * 0.45), z: z + sz, color: mixHex(tint, n % 3 ? '#2f4422' : '#6b8443', 0.25 * rnd(n + 9)), color2: '#6f8a45', pattern: 16 }); }
-  E.part(g, { geo: E.geo('cyl', 0.05, 0.7, 0.6, 6), x: x + 0.12, y: h - 0.35, z: z - 0.1, rx: 0.5, color: '#5a4434', rough: 0.95 }); // a branch
+function tree(g, x, z, k, i, clumps = 28) { // far-away trees (the street) use fewer clumps
+  const h = 2.0 + 0.6 * k, rnd = n => { const v = Math.sin((i + 1) * 12.9898 + n * 78.233) * 43758.5453; return v - Math.floor(v); };
+  const bark = { color: '#4f3d30', color2: '#3a2c22', pattern: 4, rough: 0.95 };
+  E.part(g, Object.assign({ geo: E.geo('cyl', 0.12 + 0.04 * k, h + 0.4, 0.62, 10), x, y: 0, z }, bark));
+  // a few limbs leaning out, so the canopy sits on branches instead of floating on a pole
+  for (let b = 0; b < 3; b++) { const a = b * 2.1 + rnd(b + 200) * 0.8;
+    E.part(g, Object.assign({ geo: E.geo('cyl', 0.045 + 0.015 * k, 1.0 + 0.3 * k, 0.55, 6), x: x + Math.cos(a) * 0.1, y: h - 0.55, z: z + Math.sin(a) * 0.1, ry: Math.PI - a, rz: 0.75 }, bark)); } // ry = π − a tips each limb outwards along a
+  // the canopy: many small, irregular leaf clumps in mixed greens (a few big balls read as a toy tree)
+  const tint = ['#3b5428', '#43592c', '#4b5d31'][i % 3], W = 1 + 0.3 * k;
+  const big = Math.sqrt(28 / clumps);
+  for (let n = 0; n < clumps; n++) { const a = n * 2.39996, rr = 0.2 + 0.8 * Math.sqrt(rnd(n)), up = rnd(n + 40);
+    const r = (0.26 + 0.2 * rnd(n + 80)) * (0.9 + 0.3 * k) * big, sx = Math.cos(a) * rr * 1.15 * W, sz = Math.sin(a) * rr * 1.15 * W;
+    const y = h + 0.1 + up * 1.35 * W * (1 - rr * 0.5) - (rr > 0.8 ? 0.25 : 0);
+    E.part(g, { geo: E.geo('sph', r, 10), x: x + sx, y, z: z + sz, sy: 0.82 + 0.25 * rnd(n + 120), color: mixHex(tint, rnd(n + 9) < 0.5 ? '#2a3b1d' : '#677a3c', 0.35 * rnd(n + 30)), color2: '#6a7f42', pattern: 24 }); }
 }
 function houseBounds() { // footprint of the built rooms only (yards excluded), all floors
   const rs = allRooms().filter(r => !isYard(r)); if (!rs.length) return null;
@@ -2979,12 +3055,13 @@ function buildSite(b) {
   const g = E.addGroup('ground', { kind: 'ground' });
   const ext = extColor(), wallCol = mixHex(ext, '#8a7a66', 0.18), cap = '#d6cdbf', pave = { color: '#c2b8a8', color2: '#8f8678', pattern: 12, patScale: 1, cast: false };
   // lawn (the whole world) and a street in front of the gate
-  E.part(g, { geo: E.geo('box', 260, 0.05, 260), x: cx, y: -0.1, z: cz, color: '#4d6236', color2: '#68714a', pattern: 11, cast: false });
+  E.part(g, { geo: E.geo('box', 260, 0.05, 260), x: cx, y: -0.1, z: cz, color: '#56633a', color2: '#7d7a50', pattern: 11, cast: false });
   const front = r.side, horiz = front === 'N' || front === 'S';
   const roadAt = front === 'N' ? r.z0 - 4.2 : front === 'S' ? r.z1 + 4.2 : front === 'W' ? r.x0 - 4.2 : r.x1 + 4.2;
   E.part(g, horiz ? { geo: E.geo('box', 260, 0.05, 6), x: cx, y: -0.085, z: roadAt, color: '#4a4c4f', pattern: 8, patScale: 2, rough: 0.8, cast: false } : { geo: E.geo('box', 6, 0.05, 260), x: roadAt, y: -0.085, z: cz, color: '#4a4c4f', pattern: 8, patScale: 2, rough: 0.8, cast: false });
   const kerb = front === 'N' || front === 'W' ? 3 : -3;
   E.part(g, horiz ? { geo: E.geo('box', 260, 0.14, 0.18), x: cx, y: -0.1, z: roadAt + kerb, color: '#bfb9ae', cast: false } : { geo: E.geo('box', 0.18, 0.14, 260), x: roadAt + kerb, y: -0.1, z: cz, color: '#bfb9ae', cast: false });
+  if (S.context !== false && E.quality !== 'low') buildContext(g, r, roadAt, front); // the street is skipped on the lowest 3D quality
   // paved apron hugging the house (not the yards)
   const hb = houseBounds() || b;
   E.part(g, Object.assign({ geo: E.geo('box', hb.w + 1.8, 0.06, hb.d + 1.8), x: hb.x + hb.w / 2, y: -0.075, z: hb.y + hb.d / 2 }, pave));
@@ -3033,7 +3110,7 @@ function buildSite(b) {
   side('h', r.z0, r.x0, r.x1, front === 'N'); side('h', r.z1, r.x0, r.x1, front === 'S'); side('v', r.x0, r.z0, r.z1, front === 'W'); side('v', r.x1, r.z0, r.z1, front === 'E');
   if (r.yards) return; // the drawn garden / parking are landscaped by buildYard
   // garden: hedges along the back and sides, trees in the corners, shrubs by the door
-  const hedge = (o, c, a0, a1) => { const len = a1 - a0; if (len < 1) return; E.part(g, o === 'h' ? { geo: E.geo('box', len, 0.75, 0.6), x: (a0 + a1) / 2, y: -0.06, z: c, color: '#3f6230', color2: '#62863e', pattern: 16 } : { geo: E.geo('box', 0.6, 0.75, len), x: c, y: -0.06, z: (a0 + a1) / 2, color: '#3f6230', color2: '#62863e', pattern: 16 }); };
+  const hedge = (o, c, a0, a1) => { const len = a1 - a0; if (len < 1) return; E.part(g, o === 'h' ? { geo: E.geo('box', len, 0.75, 0.6), x: (a0 + a1) / 2, y: -0.06, z: c, color: '#3b5129', color2: '#5e7339', pattern: 16 } : { geo: E.geo('box', 0.6, 0.75, len), x: c, y: -0.06, z: (a0 + a1) / 2, color: '#3b5129', color2: '#5e7339', pattern: 16 }); };
   const back = { N: 'S', S: 'N', E: 'W', W: 'E' }[front];
   if (back === 'N') hedge('h', r.z0 + 0.55, r.x0 + 2.4, r.x1 - 2.4); if (back === 'S') hedge('h', r.z1 - 0.55, r.x0 + 2.4, r.x1 - 2.4);
   if (back === 'W') hedge('v', r.x0 + 0.55, r.z0 + 2.4, r.z1 - 2.4); if (back === 'E') hedge('v', r.x1 - 0.55, r.z0 + 2.4, r.z1 - 2.4);
@@ -3052,12 +3129,20 @@ function buildSite(b) {
     bush(g, horiz ? u : fx, horiz ? fz : u, 0.55, Math.round(u * 10), -0.06); }
 }
 /* ---------- open-air spaces: balcony railings, car parking, gardens ---------- */
+const TEAK = { color: '#5a3a24', rough: 0.62 };
 function buildRail(box, p, extCol) { // modern balcony railing: low upstand, frameless glass, steel posts and handrail
   const len = p.b - p.a, mid = (p.a + p.b) / 2, steel = { color: '#c3c7cc', metal: 0.9, rough: 0.25 };
   box(p.o, len + 0.04, 0.12, 0.14, mid, 0, p.c, { color: mixHex(extCol, '#ffffff', 0.2), pattern: 10 });
   box(p.o, Math.max(0.05, len - 0.04), 0.86, 0.014, mid, 0.13, p.c, { color: '#6f8790', pattern: 15, alpha: 0.1, cast: false });
   box(p.o, len + 0.04, 0.05, 0.07, mid, 1.0, p.c, steel);
   const n = Math.max(1, Math.ceil(len / 1.3)); for (let i = 0; i <= n; i++) box(p.o, 0.045, 0.9, 0.05, p.a + 0.03 + (len - 0.06) * i / n, 0.12, p.c, steel);
+}
+function buildTimberRail(box, p) { // Mediterranean balcony / terrace railing: dark timber posts, rails and balusters
+  const len = p.b - p.a, mid = (p.a + p.b) / 2;
+  const n = Math.max(1, Math.ceil(len / 1.6)), k = Math.max(2, Math.round(len / 0.2));
+  box(p.o, len + 0.06, 0.08, 0.11, mid, 0.96, p.c, TEAK); box(p.o, len, 0.06, 0.07, mid, 0.08, p.c, TEAK);
+  for (let i = 0; i <= n; i++) box(p.o, 0.11, 1.06, 0.11, p.a + 0.055 + (len - 0.11) * i / n, 0, p.c, TEAK);
+  for (let i = 1; i < k; i++) box(p.o, 0.035, 0.82, 0.035, p.a + len * i / k, 0.14, p.c, TEAK);
 }
 // deterministic pseudo-random numbers per room, so the landscaping doesn't jump around on every rebuild
 function seeded(seed) { let h = 2166136261; for (const ch of String(seed)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); } return () => { h = (h + 0x6D2B79F5) | 0; let t = Math.imul(h ^ (h >>> 15), 1 | h); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
@@ -3112,11 +3197,70 @@ function buildBike(id, x, z, ang, col, y) { // a sport motorbike, length along l
   P(E.geo('cyl', 0.05, 0.5, 1, 10), { x: 0.14, y: 0.36, z: -0.55, rx: Math.PI / 2 - 0.25 }, { color: '#c4c8cc', metal: 1, rough: 0.2 }); // exhaust
   P(B(0.12, 0.06, 0.03), { y: 0.86, z: 0.75 }, { color: '#eef3f6', emissive: night ? '#fff1c8' : '#202326', cast: false });
 }
+/* ---------- the street around the plot ----------
+   A house alone in an endless field reads as a game level. Real homes sit in a street: footpaths, neighbouring
+   plots with their own walls and houses, street trees. The neighbours are kept as calm, muted massing (the way
+   architects show context), so the user's own house stays the subject. Deterministic per project. */
+function buildContext(g, r, roadAt, front) {
+  const horiz = front === 'N' || front === 'S', sg = front === 'S' || front === 'E' ? 1 : -1; // +1: the road lies towards +v
+  const u0 = horiz ? r.x0 : r.z0, u1 = horiz ? r.x1 : r.z1, vF = horiz ? (sg > 0 ? r.z1 : r.z0) : (sg > 0 ? r.x1 : r.x0);
+  const depth = Math.max(12, horiz ? r.z1 - r.z0 : r.x1 - r.x0), rnd = seeded('street' + (P().id || '') + front);
+  // (u along the road, v across it) -> world; boxes are given as (length along u, height, length along v)
+  const at = (u, v) => horiz ? [u, v] : [v, u];
+  const MERGE = new Map(); // material -> boxes; every window, door, wall and gate of the street becomes one draw call per material
+  const box = (u, v, lu, h, lv, y, m) => { const [x, z] = at(u, v), w = horiz ? lu : lv, d = horiz ? lv : lu;
+    if (m && m.merge) { if (!MERGE.has(m)) MERGE.set(m, []); MERGE.get(m).push({ x, y, z, w, h, d }); return; }
+    return E.part(g, Object.assign({ geo: E.geo('box', w, h, d), x, y, z, cast: false }, m)); };
+  const path = { color: '#b9b3a8', color2: '#9a948a', pattern: 12, patScale: 0.8, rough: 0.85 }, kerbM = { color: '#c7c1b6' };
+  const L = 150, uc = (u0 + u1) / 2;
+  // footpaths on both sides of the road, and the far kerb
+  box(uc, roadAt - sg * 3.65, L, 0.08, 1.3, -0.09, path);
+  box(uc, roadAt + sg * 3.95, L, 0.1, 1.9, -0.09, path);
+  box(uc, roadAt + sg * 3.05, L, 0.14, 0.18, -0.1, kerbM);
+  const PAL = ['#ddd5c7', '#e4e0d8', '#d2c8b8', '#cdbfa8', '#d9d4cb', '#d6c9b6', '#c9c4bb'];
+  const glass = { color: '#2f3539', rough: 0.15, metal: 0.2, merge: 1 }, frame = { color: '#3b3b3a', rough: 0.6, merge: 1 }, doorM = { color: '#5b4635', rough: 0.6, merge: 1 };
+  const wallM = { color: '#c9c0b2', pattern: 10, merge: 1 }, gateM = { color: '#2a2b2d', metal: 0.6, rough: 0.45, merge: 1 }, copeM = { color: '#cfc8bc', merge: 1 }, slabM = { color: '#d9d3c8', merge: 1 };
+  const tank = { color: '#1f2224', rough: 0.5 };
+  const neighbour = (ua, ub, vNear, dir) => { // one plot: boundary walls, a house set back from the street, a tree
+    const w = ub - ua, um = (ua + ub) / 2, col = PAL[Math.floor(rnd() * PAL.length)];
+    box(um, vNear - dir * 0.1, w - 0.2, 1.1, 0.2, -0.06, wallM); // front wall with a dark steel gate
+    box(ua + w * 0.25, vNear - dir * 0.1, 3, 1.2, 0.08, -0.05, gateM);
+    [ua, ub].forEach(t => box(t, vNear - dir * depth / 2, 0.2, 1.1, depth - 0.2, -0.06, wallM));
+    const set = 3 + rnd() * 1.5, hw = Math.max(5, w - 3.6 - rnd() * 1.4), hd = Math.min(depth - set - 2.5, 8.5 + rnd() * 3), st = rnd() < 0.7 ? 2 : 1, H = st * 3.1;
+    const hu = um + (rnd() - 0.5) * Math.max(0, w - hw - 3.2), hv = vNear - dir * (set + hd / 2);
+    box(hu, hv, hw, H, hd, -0.06, { color: col, pattern: 10, cast: true });
+    box(hu, hv, hw + 0.04, 0.95, hd + 0.04, H - 0.06, { color: mixHex(col, '#f3efe8', 0.3), pattern: 10 }); // parapet
+    box(hu, hv, hw + 0.1, 0.06, hd + 0.1, H + 0.88, copeM); // coping
+    box(hu - dir * 0.2, hv + dir * (hd / 2 + 0.6), Math.min(hw * 0.6, 4), 0.14, 1.2, 3.0, slabM); // first-floor balcony slab / porch roof
+    if (rnd() < 0.8) { const [x, z] = at(hu + hw * 0.3, hv - dir * hd * 0.25); E.part(g, Object.assign({ geo: E.geo('cyl', 0.55, 1.2, 1, 14), x, y: H + 0.85, z }, tank)); }
+    // windows on every face, storey by storey (a blank box reads as a placeholder, not a house)
+    const win = (cu, cv, alongU, y, out) => { const o = 0.035 * out; // out: +1/-1, the side the face looks to
+      if (alongU) { box(cu, cv + o, 1.3, 1.25, 0.05, y, frame); box(cu, cv + 2 * o, 1.12, 1.07, 0.05, y + 0.09, glass); }
+      else { box(cu + o, cv, 0.05, 1.25, 1.3, y, frame); box(cu + 2 * o, cv, 0.05, 1.07, 1.12, y + 0.09, glass); } };
+    for (let k = 0; k < st; k++) { const y = k * 3.1 + 0.95, nf = Math.max(1, Math.floor(hw / 2.8)), ns = Math.max(1, Math.floor(hd / 3.4));
+      for (let i = 0; i < nf; i++) { const cu = hu - hw / 2 + (i + 0.5) * hw / nf;
+        if (k === 0 && i === nf - 1) box(cu, hv + dir * (hd / 2 + 0.03), 1.05, 2.15, 0.06, -0.02, doorM); // front door
+        else win(cu, hv + dir * hd / 2, true, y, dir);
+        win(cu, hv - dir * hd / 2, true, y, -dir); }
+      for (let i = 0; i < ns; i++) { const cv = hv - hd / 2 + (i + 0.5) * hd / ns; win(hu - hw / 2, cv, false, y, -1); win(hu + hw / 2, cv, false, y, 1); } }
+    if (rnd() < 0.75) tree(g, ...at(um + (rnd() - 0.5) * (w - 3), vNear - dir * (set * 0.5)), 0.6 + rnd() * 0.5, Math.floor(rnd() * 9), 12);
+  };
+  // our side of the street: two plots on each side, sharing our boundary
+  const pw = () => 11 + rnd() * 5;
+  let a = u1 + 0.3; for (let i = 0; i < 2; i++) { const w = pw(); neighbour(a, a + w, vF, -sg); a += w + 0.3; }
+  a = u0 - 0.3; for (let i = 0; i < 2; i++) { const w = pw(); neighbour(a - w, a, vF, -sg); a -= w + 0.3; }
+  // across the road: a row of plots
+  const vFar = roadAt + sg * 4.95; a = uc - 30;
+  while (a < uc + 30) { const w = pw(); neighbour(a, a + w, vFar, sg); a += w + 0.3; }
+  // street trees along the far footpath
+  for (let t = uc - 32; t < uc + 34; t += 9 + rnd() * 3) tree(g, ...at(t, roadAt + sg * 4.4), 0.7 + rnd() * 0.5, Math.floor(rnd() * 9), 12);
+  let k = 0; MERGE.forEach((list, m) => { const { merge, ...mat } = m; E.part(g, Object.assign({ geo: E.mergedBoxes('street' + k++, list), x: 0, y: 0, z: 0, cast: false }, mat)); });
+}
 /* lush shrubs: a cluster of overlapping leaf balls */
 function bush(g, x, z, s, seed, y = 0) {
   const rnd = seeded('bush' + seed + x.toFixed(2) + z.toFixed(2));
   for (let i = 0; i < 6; i++) { const a = rnd() * 6.283, d = (i ? 0.35 + rnd() * 0.25 : 0) * s, r = (0.36 + rnd() * 0.18) * s;
-    E.part(g, { geo: E.geo('sph', r, 12), x: x + Math.cos(a) * d, y: y + r * 0.75 + rnd() * 0.12 * s, z: z + Math.sin(a) * d, sy: 0.9, color: ['#35602a', '#3f6d2e', '#2f5726'][i % 3], color2: '#78a24a', pattern: 16 }); }
+    E.part(g, { geo: E.geo('sph', r, 12), x: x + Math.cos(a) * d, y: y + r * 0.75 + rnd() * 0.12 * s, z: z + Math.sin(a) * d, sy: 0.9, color: ['#3a5228', '#435a2c', '#33492a'][i % 3], color2: '#6c7f45', pattern: 24 }); }
 }
 function buildGarage(r, f, yOff) { // car + motorbike inside, nose to the door, LED strip lights
   const gd = garageDoors(f).find(d => d.room === r.id) || f.doors.find(d => d.w >= 2.2 && Math.abs((d.o === 'h' ? d.y : d.x) - (d.o === 'h' ? (Math.abs(d.y - r.y) < 0.2 ? r.y : r.y + r.d) : (Math.abs(d.x - r.x) < 0.2 ? r.x : r.x + r.w))) < 0.2);
@@ -3252,7 +3396,7 @@ function buildFloor(f, active) {
   // walls: two half-slabs per piece, each finished for the room (paint) or the outside (textured plaster)
   const wg = E.addGroup('walls:' + f.id, { kind: 'wall', y: yOff });
   const extCol = extColor(), ground = !floorBelow(f);
-  const fc = facade(), FRAME = { color: fc.frame, metal: 0.55, rough: 0.38 };
+  const fc = facade(), FRAME = fc.frameWood ? { color: fc.frame, rough: 0.6 } : { color: fc.frame, metal: 0.55, rough: 0.38 };
   const box = (o, len, h, th, along, y, across, extra) => E.part(wg, Object.assign(o === 'h' ? { geo: E.geo('box', len, h, th), x: along, y, z: across } : { geo: E.geo('box', th, h, len), x: across, y, z: along }, extra));
   const isOut = r => !r || isOpenAir(r);
   // a wall can't stand over a stair opening: cut any stretch that runs across a flight coming up from below
@@ -3261,7 +3405,7 @@ function buildFloor(f, active) {
       segs = segs.flatMap(([a, b]) => { const lo = Math.max(a, a0), hi = Math.min(b, a1); if (hi - lo < 0.02) return [[a, b]]; const o = []; if (lo - a > 0.05) o.push([a, lo]); if (b - hi > 0.05) o.push([hi, b]); return o; }); });
     return segs.map(([a, b]) => Object.assign({}, p, { a, b })); });
   cutHoles(wallPieces(f)).forEach(p => {
-    if (p.kind === 'rail') { buildRail(box, p, extCol); return; }
+    if (p.kind === 'rail') { (fc.rail === 'timber' ? buildTimberRail : buildRail)(box, p, extCol); return; }
     let y0 = p.y0, y1 = p.y1; if (cut != null) { if (y0 >= cut) return; y1 = Math.min(y1, cut); }
     if (y1 - y0 < 0.01) return;
     // outer walls run past the line ends to close the corners; partitions stop just inside the outer face
@@ -3408,12 +3552,62 @@ function buildEaves(f, yOff) {
 }
 /* the part of a lower floor's roof that sticks out past the floor above (e.g. a garage) */
 function buildLowRoof(f, yOff, above) {
-  if (facade().roof !== 'overhang') return; const H = f.height, g = E.addGroup('roof:' + f.id, { kind: 'misc', y: yOff });
+  const hip = facade().roof === 'hip'; if (facade().roof !== 'overhang' && !hip) return; const H = f.height, g = E.addGroup('roof:' + f.id, { kind: 'misc', y: yOff });
   f.rooms.filter(r => roofed(f, r)).forEach(r => rectMinus({ x: r.x, y: r.y, w: r.w, d: r.d }, above.rooms).forEach(q => {
     if (q.w < 0.3 || q.d < 0.3) return;
     E.part(g, { geo: E.geo('box', q.w + 0.02, 0.18, q.d + 0.02), x: q.x + q.w / 2, y: H, z: q.y + q.d / 2, color: '#d4d0c9', showBelow: yOff + H - 0.05 });
-    E.part(g, { geo: E.geo('box', q.w, 0.02, q.d), x: q.x + q.w / 2, y: H + 0.18, z: q.y + q.d / 2, color: '#8d8a85', color2: '#6f6c68', pattern: 8, cast: false });
+    E.part(g, hip ? { geo: E.geo('box', q.w, 0.02, q.d), x: q.x + q.w / 2, y: H + 0.18, z: q.y + q.d / 2, color: '#cbb894', color2: '#a8946f', pattern: 14, patScale: 0.6, cast: false }
+      : { geo: E.geo('box', q.w, 0.02, q.d), x: q.x + q.w / 2, y: H + 0.18, z: q.y + q.d / 2, color: '#8d8a85', color2: '#6f6c68', pattern: 8, cast: false });
   }));
+  if (!hip) return; // Mediterranean: the exposed roof is a stone-paved terrace with a timber railing along its open edges
+  const walledAbove = (o, c, t, sign) => { const p = o === 'h' ? [t, c - sign * 0.3] : [c - sign * 0.3, t]; return above.rooms.some(r => !isOpenAir(r) && inRoom(r, p[0], p[1])); };
+  const box = (o, len, h, th, along, y, across, m) => E.part(g, Object.assign(o === 'h' ? { geo: E.geo('box', len, h, th), x: along, y: H + 0.2 + y, z: across } : { geo: E.geo('box', th, h, len), x: across, y: H + 0.2 + y, z: along }, m));
+  wallLines(f).forEach(L0 => roofRunsOf(f, L0, above.rooms).forEach(sg => {
+    if (walledAbove(L0.o, L0.c, (sg.a + sg.b) / 2, sg.sign) || sg.b - sg.a < 0.4) return;
+    buildTimberRail(box, { o: L0.o, a: sg.a, b: sg.b, c: L0.c });
+  }));
+}
+/* Mediterranean roofs: the roofed area is split into a few big rectangles (largest first, each grown as far as
+   the footprint allows, so neighbours overlap and read as one roof), and each gets a terracotta hip roof */
+function hipRects(f) {
+  const rs = f.rooms.filter(r => roofed(f, r)).concat(roofHoles(f)); if (!rs.length) return [];
+  const C = 0.25, x0 = Math.min(...rs.map(r => r.x)), y0 = Math.min(...rs.map(r => r.y));
+  const W = Math.ceil((Math.max(...rs.map(r => r.x + r.w)) - x0) / C), Hc = Math.ceil((Math.max(...rs.map(r => r.y + r.d)) - y0) / C);
+  if (W * Hc > 250000) return [];
+  const inside = new Uint8Array(W * Hc), done = new Uint8Array(W * Hc);
+  for (let j = 0; j < Hc; j++) for (let i = 0; i < W; i++) { const px = x0 + (i + 0.5) * C, py = y0 + (j + 0.5) * C; if (rs.some(r => px > r.x && px < r.x + r.w && py > r.y && py < r.y + r.d)) inside[j * W + i] = 1; }
+  const total = inside.reduce((t, v) => t + v, 0); let left = total; const out = [];
+  const full = (a0, a1, b0, b1) => { for (let j = b0; j < b1; j++) for (let i = a0; i < a1; i++) if (!inside[j * W + i]) return false; return true; };
+  while (out.length < 8 && left > total * 0.04) {
+    const hg = new Int32Array(W); let best = null; // largest rectangle of uncovered cells (histogram + stack)
+    for (let j = 0; j < Hc; j++) {
+      for (let i = 0; i < W; i++) hg[i] = inside[j * W + i] && !done[j * W + i] ? hg[i] + 1 : 0;
+      const st = [];
+      for (let i = 0; i <= W; i++) { const h = i < W ? hg[i] : 0; let s0 = i;
+        while (st.length && st[st.length - 1][1] >= h) { const [si, sh] = st.pop(); const a = sh * (i - si); if (sh && (!best || a > best.a)) best = { a, i0: si, i1: i, j0: j + 1 - sh, j1: j + 1 }; s0 = si; }
+        st.push([s0, h]); }
+    }
+    if (!best || best.a * C * C < 2) break;
+    let { i0, i1, j0, j1 } = best, grew = true;
+    while (grew) { grew = false;
+      if (i0 > 0 && full(i0 - 1, i0, j0, j1)) { i0--; grew = true; } if (i1 < W && full(i1, i1 + 1, j0, j1)) { i1++; grew = true; }
+      if (j0 > 0 && full(i0, i1, j0 - 1, j0)) { j0--; grew = true; } if (j1 < Hc && full(i0, i1, j1, j1 + 1)) { j1++; grew = true; } }
+    for (let j = j0; j < j1; j++) for (let i = i0; i < i1; i++) if (!done[j * W + i]) { done[j * W + i] = 1; left--; }
+    out.push({ x: x0 + i0 * C, y: y0 + j0 * C, w: (i1 - i0) * C, d: (j1 - j0) * C });
+  }
+  // snap the cell edges back onto the real wall lines
+  const xs = rs.flatMap(r => [r.x, r.x + r.w]), ys = rs.flatMap(r => [r.y, r.y + r.d]);
+  const sn = (v, arr) => { let b = v, bd = C * 0.75; arr.forEach(t => { if (Math.abs(t - v) < bd) { bd = Math.abs(t - v); b = t; } }); return b; };
+  return out.map(q => { const xa = sn(q.x, xs), xb = sn(q.x + q.w, xs), ya = sn(q.y, ys), yb = sn(q.y + q.d, ys); return { x: xa, y: ya, w: xb - xa, d: yb - ya }; }).filter(q => q.w > 0.8 && q.d > 0.8);
+}
+function buildHipRoofs(f, g, y) {
+  const ov = 0.45, pitch = Math.tan(24 * Math.PI / 180), tile = { color: '#b4532f', color2: '#7e3418', pattern: 14, patScale: 0.34, rough: 0.8 };
+  hipRects(f).forEach(q => {
+    const W = q.w + WALL_T + ov * 2, D = q.d + WALL_T + ov * 2, h = Math.min(W, D) / 2 * pitch, cx = q.x + q.w / 2, cz = q.y + q.d / 2;
+    E.part(g, Object.assign({ geo: E.geo('hip', W, h, D), x: cx, y, z: cz }, tile));
+    E.part(g, Object.assign({ geo: E.geo('box', W + 0.02, 0.13, D + 0.02), x: cx, y: y - 0.13, z: cz }, TEAK)); // timber fascia and soffit
+    const rl = Math.abs(W - D); if (rl > 0.05) E.part(g, W >= D ? { geo: E.geo('box', rl + 0.1, 0.09, 0.16), x: cx, y: y + h - 0.03, z: cz, color: '#8f3c1d', rough: 0.8 } : { geo: E.geo('box', 0.16, 0.09, rl + 0.1), x: cx, y: y + h - 0.03, z: cz, color: '#8f3c1d', rough: 0.8 }); // ridge tiles
+  });
 }
 /* roof terrace: slab, tiles, parapet with coping and a water tank — shown with the "Roof" toggle */
 function buildRoof(f, yOff) {
@@ -3428,6 +3622,7 @@ function buildRoof(f, yOff) {
   });
   roofHoles(f).forEach(q => { E.part(g, { geo: E.geo('box', q.w + 0.02, 0.16, q.d + 0.02), x: q.x + q.w / 2, y: H, z: q.y + q.d / 2, color: '#cfc7ba' });
     E.part(g, { geo: E.geo('box', q.w, 0.025, q.d), x: q.x + q.w / 2, y: H + 0.16, z: q.y + q.d / 2, color: '#b49a80', color2: '#8c7a68', pattern: 14, patScale: 0.6, cast: false }); });
+  if (facade().roof === 'hip') { buildHipRoofs(f, g, H + 0.16); return; }
   if (facade().roof !== 'overhang')
   wallLines(f).forEach(L0 => roofRunsOf(f, L0).forEach(sg => {
     const L = { o: L0.o, c: L0.c, a: sg.a, b: sg.b };
@@ -3476,13 +3671,13 @@ function applyEnv() {
   const az = sunAz(h) * Math.PI / 180 + (S.project?.north || 0) * Math.PI / 180;
   const ce = Math.cos(el); env.sunDir = V3.norm([ce * Math.sin(az), Math.max(0.03, Math.sin(el)), -ce * Math.cos(az)]);
   const k = clamp(Math.sin(el) * 1.6, 0, 1); const day = clamp((Math.sin(el) + 0.1) * 3, 0, 1);
-  const warm = [2.6, 1.45, 0.7], noon = [2.5, 2.38, 2.2];
+  const warm = [2.6, 1.45, 0.7], noon = [2.75, 2.58, 2.32];
   const zen = mixHex('#0a1022', mixHex('#4c5f92', '#3c7ccc', k), day), hor = mixHex('#1c2540', mixHex('#f0b088', '#d3e3ef', k), day);
   env.zenith = zen; env.horizon = hor; env.groundCol = mixHex('#141820', '#6d7652', day);
   env.night = 1 - day; env.clouds = 0.65; env.vignette = 0.22;
   if (day > 0) {
     env.sunCol = noon.map((v, i) => (warm[i] + (v - warm[i]) * k) * day);
-    env.amb = 0.55 + 0.45 * day; env.exposure = 0.82; env.shadows = day > 0.05;
+    env.amb = 0.5 + 0.3 * day; env.exposure = 0.74; env.shadows = day > 0.05;
   } else { // moonlight: a cool, dim key light from high in the opposite sky, so the house still reads at night
     env.sunDir = V3.norm([-0.35, 0.75, 0.45]); env.sunCol = [0.11, 0.15, 0.26];
     env.amb = 1.0; env.exposure = 1.25; env.shadows = true;
@@ -4373,8 +4568,8 @@ async function sendChat(text) {
 /* ---------- dashboard / onboarding / settings ---------- */
 function confirmDel(id) { const t = Date.now(); if (confirmDel.id === id && t - confirmDel.t < 4000) { confirmDel.id = null; return true; } confirmDel.id = id; confirmDel.t = t; toast('Click delete again to remove this project'); return false; }
 function renderDash() {
-  const pf = S.prefs; const cu = currentUser(); $('#dash-hello').textContent = cu ? `Welcome, ${firstName(cu)}` : 'Welcome to DIMORA'; updateUserChips();
-  $('#dash-prefs').innerHTML = `<span>Style <b>${pf.style}</b></span><span>Budget <b>${inr(pf.budget)}</b></span><span>Family <b>${pf.family}</b></span>${pf.kids ? '<span><b>Kids</b></span>' : ''}${pf.pets ? '<span><b>Pets</b></span>' : ''}${pf.wfh ? '<span><b>Works from home</b></span>' : ''}<span>Storage <b>${pf.storage}</b></span><span>Furniture <b>${pf.furniture}</b></span>`;
+  const cu = currentUser(); $('#dash-hello').textContent = cu ? `Welcome, ${firstName(cu)}` : 'Welcome to DIMORA'; updateUserChips();
+  $('#dash-prefs').innerHTML = ''; // the preference chips (style, budget, family…) are no longer shown here; the box still holds the AI notice
   const own = projOwner(); const local = store.get('projects', []).filter(p => (p.owner || 'device') === own);
   const merged = local.slice(); (CLOUD.list || []).forEach(c => { const i = merged.findIndex(p => p.id === c.id); if (i < 0) merged.push(Object.assign({ cloud: true }, c)); else if (c.updated > merged[i].updated) merged[i] = Object.assign({}, merged[i], c, { cloud: true }); });
   const list = merged.sort((a, b) => b.updated - a.updated);
@@ -4764,6 +4959,7 @@ const ACT = {
   'toggle-labels': () => { S.labels = !S.labels; $('#t-lab').classList.toggle('on', S.labels); E.dirty = true; },
   'walk-outside': () => setView('walk', { outside: true }),
   'kbd-help': () => toast(S.view === 'walk' ? 'Walk: arrow keys (or W A S D) to move · drag to look around · hold Shift to walk faster' : 'Fly around: W A S D / arrows to glide · Q E to circle · Z X to zoom · T G to tilt · Shift = faster · drag to orbit', 6000),
+  'toggle-context': () => { S.context = S.context === false; $('#t-ctx')?.classList.toggle('on', S.context !== false); rebuild(); },
   'toggle-roof': () => { S.roof = !S.roof; if (S.roof && S.cutaway) { S.cutaway = false; $('#t-cut').classList.remove('on'); } $('#t-roof').classList.toggle('on', S.roof); rebuild(); },
   'toggle-sun': () => { S.daylightSim = !S.daylightSim; $('#t-sun').classList.toggle('on', S.daylightSim); rebuild(); if (S.daylightSim) toast('Sunlight now enters only through windows & doors — move the time slider'); },
   'play-day': () => { if (S.dayTimer) { clearInterval(S.dayTimer); S.dayTimer = null; return; } if (!S.daylightSim) { S.daylightSim = true; $('#t-sun').classList.add('on'); rebuild(); } let h = 6; S.dayTimer = setInterval(() => { h += 0.08; setHour(h); const lh = $('#lt-h'); if (lh) lh.textContent = fmtHour(h); if (h >= 19.2) { clearInterval(S.dayTimer); S.dayTimer = null; } }, 50); },
@@ -4876,6 +5072,114 @@ const INPUT = {
   'tour-wall-custom': el => { clearTimeout(S._tw); S._tw = setTimeout(() => tourApply([{ do: 'wall_color', room: tourRoom()?.id, color: el.value, name: 'your custom colour' }]), 400); },
 };
 
+/* ---------- AI photo render (Gemini image model) ----------
+   DIMORA photographs the user's own 3D model (aerial outside view, or a cutaway "dollhouse"), and Gemini repaints
+   that picture as a photorealistic render. Starting from the 3D picture keeps the AI to the real plan. */
+const RENDER_STYLES = {
+  mediterranean: { label: 'Mediterranean', desc: 'Terracotta tiled roofs, cream stucco, timber railings', facade: 'mediterranean', sw: ['#eadcc2', '#b4532f', '#5a3a24'] },
+  modern: { label: 'Modern villa', desc: 'White render, stone, timber, flat roofs', facade: 'modern', sw: ['#efeeea', '#c9bba6', '#2b2c2f'] },
+  indian: { label: 'Classic Indian', desc: 'Warm plaster, chajjas, parapets, teak door', facade: 'classic', sw: ['#dacbb2', '#7d7166', '#6b4429'] },
+  kerala: { label: 'Kerala tiled roof', desc: 'Steep clay-tile roofs, white walls, wooden verandahs', facade: 'mediterranean', sw: ['#f3f1ea', '#a9472a', '#7a4a2a'] },
+  match: { label: 'Keep my 3D look', desc: 'Your current colours and materials, made real', facade: null, sw: null },
+};
+const RENDER_SIZE = [1440, 1080]; // 4:3, the aspect ratio asked of Gemini
+const RD = { mode: 'exterior', style: null, light: 'golden', setting: 'white', cam: 'auto', hd: false, notes: '', shot: null, busy: false, cur: null, err: null, list: [], pid: null };
+function renderCam(asp) { // high three-quarter view from the front corner (the side with the main entrance)
+  const vf = viewFrame(), doll = RD.mode === 'dollhouse'; let base = 0, b = vf.b, c = vf.c;
+  try { base = { S: 0, N: Math.PI, E: Math.PI / 2, W: -Math.PI / 2 }[siteRect(homeBounds()).side] ?? 0; } catch (e) { }
+  const hb = houseBounds(); if (hb && hb.w > 1 && hb.d > 1) { b = hb; c = [hb.x + hb.w / 2, vf.c[1], hb.y + hb.d / 2]; } // frame the house, not the whole plot
+  const theta = base - 0.62, phi = doll ? 0.72 : 1.02;
+  const half = Math.min(E.cam.fov / 2, Math.atan(Math.tan(E.cam.fov / 2) * asp));
+  const r = (Math.hypot(b.w, b.d, doll ? 0 : vf.hgt + 2) / 2 + 0.5) / Math.sin(half) * 0.95;
+  return { pos: [c[0] + r * Math.sin(phi) * Math.sin(theta), c[1] + r * Math.cos(phi), c[2] + r * Math.sin(phi) * Math.cos(theta)], target: c };
+}
+function renderShot() { // the picture Gemini gets; the user's own view settings are put back afterwards
+  if (!E || !S.project) return null;
+  const pj = P(), st = RENDER_STYLES[RD.style] || RENDER_STYLES.match, had = k => Object.prototype.hasOwnProperty.call(pj, k);
+  const keep = { roof: S.roof, cutaway: S.cutaway, showAllFloors: S.showAllFloors, explode: S.explode, sel: S.sel, hour: S.hour, labels: S.labels },
+    kp = { facade: [had('facade'), pj.facade], exterior: [had('exterior'), pj.exterior] }, mode = CTL.mode, cam = { pos: E.cam.pos.slice(), target: E.cam.target.slice() };
+  try {
+    CTL.anim = null; S.sel = null; S.explode = false;
+    if (RD.mode === 'dollhouse') { S.cutaway = true; S.roof = false; S.showAllFloors = false; }
+    else { S.cutaway = false; S.roof = true; S.showAllFloors = true; if (st.facade) { pj.facade = st.facade; pj.exterior = null; } }
+    if (isNight() && RD.light !== 'evening') S.hour = 15; // a dark picture gives the AI little to go on
+    if (RD.cam === 'auto') CTL.mode = 'orbit';
+    rebuild();
+    if (RD.cam === 'auto') { const v = renderCam(RENDER_SIZE[0] / RENDER_SIZE[1]); E.cam.pos = v.pos; E.cam.target = v.target; }
+    return E.capture(RENDER_SIZE[0], RENDER_SIZE[1]);
+  } catch (e) { console.warn('render shot', e); return null; }
+  finally {
+    Object.assign(S, keep); CTL.mode = mode; E.cam.pos = cam.pos; E.cam.target = cam.target;
+    Object.entries(kp).forEach(([k, [h, v]]) => { if (h) pj[k] = v; else delete pj[k]; });
+    rebuild(); E.dirty = true;
+  }
+}
+function openRender() {
+  if (!S.project || !E) return toast('Open a home first');
+  if (S.touring) stopTour();
+  if (RD.pid !== P().id) { RD.pid = P().id; RD.cur = null; RD.style = null; }
+  if (!RD.style) RD.style = { mediterranean: 'mediterranean', classic: 'indian', brick: 'match', modern: 'modern' }[P().facade || 'modern'] || 'mediterranean';
+  RD.err = null;
+  const go = () => { if (!RD.busy) RD.shot = renderShot(); paintRender(true); $('#modal').classList.add('on'); API.health().then(() => paintRender()); };
+  if (S.view === '2d') { setView('3d'); setTimeout(go, 120); } else go();
+}
+function paintRender(first) {
+  const card = $('#modal-card'); if (!card || (!first && !$('#rd-wrap'))) return;
+  const ext = RD.mode === 'exterior', cur = RD.cur && RD.cur.pid === P()?.id ? RD.cur : null, av = S.backend?.ai?.render, mine = RD.list.filter(x => x.pid === P()?.id);
+  const opt = (k, v, label) => `<button class="${RD[k] === v ? 'on' : ''}" data-act="rd-set" data-k="${k}" data-v="${v}">${label}</button>`;
+  const name = (P()?.name || 'home').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'home';
+  const stage = cur ? `<div class="cmp"><img src="${cur.img}" alt="AI photo render of your home"><div class="after" id="rd-after" style="width:35%"><img src="${cur.shot}" alt="Your 3D model"></div><span class="lb" style="left:8px">3D model</span><span class="lb" style="right:8px">AI render</span><input type="range" min="0" max="100" value="35" data-act-input="rd-slide" aria-label="Compare the 3D model with the AI render"></div>`
+    : RD.shot ? `<img src="${RD.shot}" alt="The view of your 3D model that Gemini will repaint"><span class="lb" style="left:8px">What Gemini will see</span>` : `<div class="rd-busy"><b>Couldn't take a picture of the 3D view</b></div>`;
+  card.innerHTML = `<button class="x" data-act="modal-close" aria-label="Close">✕</button>
+  <div id="rd-wrap" class="rd-wrap"><p class="eyebrow">AI Photo Render · Google Gemini</p><h2>Turn your 3D home into a photo</h2>
+  <p class="muted rd-sub">DIMORA photographs your 3D model and Gemini repaints it as a realistic render. Your walls, floors, doors and windows stay where your plan has them.</p>
+  <div class="rd-grid"><div class="rd-left">
+    <div class="rd-stage ${RD.busy ? 'busy' : ''}" id="rd-stage">${stage}${RD.busy ? `<div class="rd-busy"><div class="rd-spin"></div><b>Painting your home…</b><small>Usually 10–40 seconds${RD.hd ? ' · HD takes longer' : ''}</small></div>` : ''}</div>
+    ${cur ? `<div class="row rd-actions"><a class="btn sm primary" href="${cur.img}" download="dimora-${name}-render.${/jpe?g/.test(cur.img.slice(5, 20)) ? 'jpg' : 'png'}">⬇ Download</a><button class="btn sm" data-act="rd-go" ${RD.busy ? 'disabled' : ''}>↻ Another version</button><button class="btn sm ghost" data-act="rd-back">✎ Change options</button><span class="muted rd-meta">${esc(cur.model)} · ${(cur.ms / 1000).toFixed(1)} s${cur.remaining != null ? ` · ${cur.remaining} render${cur.remaining === 1 ? '' : 's'} left this hour` : ''}</span></div>
+      <p class="muted rd-disc">AI visualisation: small details can differ from your plan. Drag the slider to compare it with the 3D model.</p>` : ''}
+    ${cur ? '' : `<button class="btn primary rd-go" data-act="rd-go" ${RD.busy || !RD.shot ? 'disabled' : ''}>${RD.busy ? 'Rendering…' : '✨ Render photo'}</button>`}
+    ${RD.err ? `<p class="rd-err">${esc(RD.err)}</p>` : av && !av.available ? `<p class="rd-err">Gemini isn't connected. Add a free key in <a data-act="settings">⚙ Settings</a>, or set GEMINI_API_KEY on the server.</p>` : !S.backendOK && S.backendAt ? `<p class="rd-err">The DIMORA backend is offline. AI renders run on the server.</p>` : ''}
+    ${mine.length > 1 ? `<div class="rd-gal">${mine.map(x => `<button class="${x === cur ? 'on' : ''}" data-act="rd-pick" data-id="${x.id}" title="${esc(RENDER_STYLES[x.style]?.label || x.mode)}"><img src="${x.img}" alt=""></button>`).join('')}</div>` : ''}
+  </div><div class="rd-opts">
+    <label>View</label><div class="seg sm">${opt('mode', 'exterior', '🏡 Outside')}${opt('mode', 'dollhouse', '🏠 Dollhouse (inside)')}</div>
+    ${ext ? `<label>Style</label><div class="rd-styles">${Object.entries(RENDER_STYLES).map(([k, v]) => `<button class="theme ${RD.style === k ? 'on' : ''}" data-act="rd-set" data-k="style" data-v="${k}" title="${esc(v.desc)}"><b>${v.label}</b><div class="dots">${(v.sw || [extColor(), ...facade().sw.slice(1, 3)]).map(c => `<i style="background:${c}"></i>`).join('')}</div></button>`).join('')}</div>`
+      : `<p class="muted rd-hint">Shows the ${esc(FL().name)} with your ${esc(P().theme)} interiors, roof off.</p>`}
+    <label>Light</label><div class="seg sm">${opt('light', 'golden', 'Golden hour')}${opt('light', 'day', 'Daylight')}${opt('light', 'evening', 'Evening')}</div>
+    ${ext ? `<label>Background</label><div class="seg sm">${opt('setting', 'white', 'Clean white')}${opt('setting', 'garden', 'Garden & sky')}</div>` : ''}
+    <label>Camera</label><div class="seg sm">${opt('cam', 'auto', 'Auto aerial')}${opt('cam', 'view', 'My current view')}</div>
+    <label>Quality</label><div class="seg sm">${opt('hd', false, 'Standard')}${opt('hd', true, 'HD · 2K')}</div>
+    <label for="rd-notes">Extra wishes <small>(optional)</small></label><textarea id="rd-notes" maxlength="300" rows="2" placeholder="e.g. blue front door, a swimming pool in the garden, solar panels" data-act-input="rd-notes">${esc(RD.notes)}</textarea>
+  </div></div></div>`;
+}
+async function renderGo() {
+  if (RD.busy || !S.project) return;
+  if (!RD.shot) RD.shot = renderShot(); if (!RD.shot) return;
+  const pj = P(), act = FL(), shot = RD.shot, o = { mode: RD.mode, style: RD.style, light: RD.light, setting: RD.setting, hd: RD.hd, notes: RD.notes.trim() };
+  const floors = (o.mode === 'dollhouse' ? pj.floors.filter(f => f.level <= act.level) : pj.floors).slice().sort((a, b) => a.level - b.level).map(f => ({ name: f.name, rooms: f.rooms.map(r => r.name) }));
+  RD.busy = true; RD.err = null; paintRender();
+  try {
+    const j = await API.req('/api/render', { body: Object.assign({ image: shot, theme: pj.theme, floors, aspect: '4:3' }, o), timeout: 240000 });
+    const item = Object.assign({ id: uid('rd'), pid: pj.id, img: j.image, shot, model: j.model, ms: j.ms, remaining: j.remaining, at: Date.now() }, o);
+    RD.list.unshift(item); RD.list = RD.list.slice(0, 8); RD.cur = item;
+    if (!$('#rd-wrap')) toast('Your AI render is ready. Open 📸 AI Render to see it.', 5000);
+  } catch (e) {
+    RD.err = e.code === 'offline' ? 'The DIMORA backend is offline. AI renders run on the server.' : e.code === 'timeout' ? 'Gemini took too long. Please try again.' : e.message;
+    if (!$('#rd-wrap')) toast('AI render failed: ' + RD.err, 5000);
+  } finally { RD.busy = false; paintRender(); }
+}
+Object.assign(ACT, {
+  'render-open': () => openRender(),
+  'rd-set': el => { if (RD.busy) return; const k = el.dataset.k; let v = el.dataset.v; if (v === 'true' || v === 'false') v = v === 'true';
+    RD[k] = v; RD.cur = null; RD.err = null; if (['mode', 'style', 'cam'].includes(k)) RD.shot = renderShot(); paintRender(); },
+  'rd-go': () => renderGo(),
+  'rd-back': () => { RD.cur = null; RD.shot = renderShot(); paintRender(); },
+  'rd-pick': el => { const x = RD.list.find(i => i.id === el.dataset.id); if (x) { RD.cur = x; paintRender(); } },
+});
+Object.assign(INPUT, {
+  'rd-notes': el => { RD.notes = el.value; },
+  'rd-slide': el => { const a = $('#rd-after'); if (a) a.style.width = el.value + '%'; },
+});
+
 /* ---------- installable app (PWA) ---------- */
 const PWA = { prompt: null };
 function initPWA() {
@@ -4914,7 +5218,7 @@ function boot() {
   if (store.get('g_redirect', 0)) { store.set('g_redirect', 0); initFirebase().then(fb => fb && fb.getRedirectResult()).then(r => { if (r && r.user) finishGoogleSignIn(r.user); }).catch(e => { AUTH.err = fbErr(e); show('login'); renderAuth(); }); }
   else if (currentUser()?.method === 'google') restoreGoogleSession();
   if (CLOUD.token && currentUser()?.method === 'cloud') API.req('/api/auth/me', { timeout: 10000 }).then(j => { const u = store.get('user', null); if (u && j.user) { u.name = j.user.name || u.name; if (j.user.prefs && j.user.prefs.answers) u.answers = j.user.prefs.answers; store.set('user', u); updateUserChips(); } setSyncChip('ok'); }).catch(() => { });
-  window.DIMORA = { ACT, CHANGE, CLOUD, isCloud, openWorkspace, S, E: () => E, CTL: () => CTL, rebuild, askAria, localParse, analyzeSpace, analyzeLight, homeCost, archChecks, sampleHome, startTour, stopTour, setView, TOUR, show, resetUpload, execActions, floorY, stairEnd, stairFoot, sampleDuplex, tourOrder, drawPlanImage, withProject, renderAuth, save, transformRoom, _fs: { fsPut, fsGet, fsDel, fsList }, edgePlan, applyEdge, resizeRoomTo, fitStairs, stairWallCross, overlapping, tidyRooms, wallLines, walkCollide };
+  window.DIMORA = { ACT, CHANGE, CLOUD, isCloud, openWorkspace, S, E: () => E, CTL: () => CTL, rebuild, askAria, localParse, analyzeSpace, analyzeLight, homeCost, archChecks, sampleHome, startTour, stopTour, setView, TOUR, show, resetUpload, execActions, floorY, stairEnd, stairFoot, sampleDuplex, tourOrder, drawPlanImage, withProject, renderAuth, save, transformRoom, _fs: { fsPut, fsGet, fsDel, fsList }, edgePlan, applyEdge, resizeRoomTo, fitStairs, stairWallCross, overlapping, tidyRooms, wallLines, walkCollide, openRender, renderShot, RD, hipRects, furnishAll, applyEnv };
 }
 
 /* ===================== LOGIN PORTAL (Gmail) & INTRO QUESTIONS ===================== */

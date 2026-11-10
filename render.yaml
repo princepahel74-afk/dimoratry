@@ -24,6 +24,12 @@ services:
         value: "20"
       - key: DIMORA_AI_PER_DAY      # AI calls for the whole site per day on your key
         value: "500"
+      - key: GEMINI_IMAGE_MODEL     # 📸 AI Render (image models need billing enabled in Google AI Studio)
+        value: gemini-nano-banana-2.1
+      - key: DIMORA_RENDER_PER_HOUR # AI photo renders per visitor per hour on your key (HD uses 3)
+        value: "6"
+      - key: DIMORA_RENDER_PER_DAY  # AI photo renders for the whole site per day on your key
+        value: "60"
       - key: DIMORA_MAX_UPLOAD_MB
         value: "15"
       - key: DATABASE_URL           # accounts + saved homes: paste a free Neon / Supabase Postgres URL
